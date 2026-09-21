@@ -64,9 +64,10 @@ LAND_NAV_PAIRING_X=393
 LAND_NAV_KEYBOARD_X=1200
 LAND_NAV_TRACKPAD_X=2007
 LAND_NAV_Y=1014
-# 「123」小键盘开关中心（竖屏融合布局右上角，已避开状态栏）
+# 「123」小键盘开关中心（竖屏融合布局右上角，已避开状态栏）。
+# 坐标经 uiautomator 标定：可点击节点 bounds [871,113][1047,198]，中心 (959,155)。
 NUMPAD_BTN_X=959
-NUMPAD_BTN_Y=170
+NUMPAD_BTN_Y=155
 # 边缘内滑起点：x=5 在最左缘。MIUI 等手势导航系统会把它当成系统返回手势，
 # 由 App 的 BackHandler 接到「唤出 dock」上；原生 Android 上由边缘激活层直接识别。
 EDGE_SWIPE_X=5
@@ -80,9 +81,10 @@ shot() { # shot <设备上的文件名> <本地文件名>
 
 # 唤出 dock：dock 在键盘 / 触控板页默认自动隐藏，切换模式前必须先边缘内滑唤出。
 # 横屏时滑动起点纵坐标取半高（540），竖屏取半高（1200）。
+# 手势：从最左缘（x=5）向内滑到 x=300（远超 24dp≈66px 的触发阈值）。
 show_dock() { # show_dock <滑动起点纵坐标>
   local Y="$1"
-  adb -s "$DEV" shell input swipe "$EDGE_SWIPE_X" "$Y" 400 "$Y" 250
+  adb -s "$DEV" shell input swipe "$EDGE_SWIPE_X" "$Y" 300 "$Y" 250
   sleep 1
 }
 
