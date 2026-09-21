@@ -14,23 +14,25 @@ import androidx.core.content.ContextCompat
  * 系统 bond / 配对广播源（方案 A 的配对桥接层）。
  *
  * ## 为什么需要它
- * 手机作为 HID **外设**时，配对是由对端主机（iPhone / iPad / Mac / Windows）发起的 SSP 流程：
+ * 手机作为 HID **外设**时，配对通常由对端主机（iPhone / iPad / Mac / Windows）发起：
  * 1. 对端在蓝牙菜单里选择「口袋键鼠」；
- * 2. 系统弹出配对对话框（数字比较 / Just Works），由**系统 UI** 呈现，App 无法自定义这一步；
- * 3. 系统发出 `BluetoothDevice.ACTION_PAIRING_REQUEST`，bond 状态按
- *    `BOND_NONE → BOND_BONDING → BOND_BONDED` 演进。
+ * 2. 系统按 SSP 变体发出 `BluetoothDevice.ACTION_PAIRING_REQUEST`；
+ * 3. bond 状态按 `BOND_NONE → BOND_BONDING → BOND_BONDED` 演进。
  *
- * Android 平台**无法完全自定义 HID 配对码输入流程**（`setPairingConfirmation` 从 API 35 起
- * 还需要 `BLUETOOTH_PRIVILEGED`，普通应用不可用），因此本层的策略是：
- * - 走系统标准 SSP（数字比较 / Just Works）；
- * - 把系统配对框上的 6 位数字（`EXTRA_PAIRING_KEY`）通过
- *   [HidStatusListener.onPairingRequest] 上报，UI 用它作为配对码显示的兜底；
- * - UI 提示用户「在需要控制的设备上确认」。
+ * 本类负责**注册并接收**这些广播（含 `ACTION_PAIRING_REQUEST`），把它们转成纯 Kotlin
+ * 的 [BondEvent] 交给 [HidDeviceTransport]：
+ * - `ACTION_PAIRING_REQUEST` → [BondEvent.PairingRequest]，transport 再按 variant 交给
+ *   [SystemPairingResponder] 自动应答（App 配对码 setPin / setPairingConfirmation，Bug 2a），
+ *   应答失败或前置条件不满足时系统对话框照常出现；
+ * - `ACTION_BOND_STATE_CHANGED` → [BondEvent.BondStateChanged]；
+ * - `ACTION_STATE_CHANGED` → [BondEvent.AdapterStateChanged]（蓝牙关闭时 HID 会被自动
+ *   注销，需要重新注册）。
  *
- * 监听广播：
- * - `BluetoothDevice.ACTION_PAIRING_REQUEST`
- * - `BluetoothDevice.ACTION_BOND_STATE_CHANGED`
- * - `BluetoothAdapter.ACTION_STATE_CHANGED`（蓝牙关闭时 HID 会被自动注销，需重新注册）
+ * 注册参数说明（Android 13+ 行为）：
+ * - **导出性**：三者都是受保护的系统广播，用 `RECEIVER_NOT_EXPORTED` 注册最安全；
+ * - **权限**：`ACTION_PAIRING_REQUEST` / `ACTION_BOND_STATE_CHANGED` 的接收需要
+ *   `BLUETOOTH_CONNECT`（Android 12+ 运行时权限），缺权限时 `registerReceiver` 会抛
+ *   `SecurityException`，这里捕获并记日志，不影响 App 运行（HID 层同样会上报不可用）。
  */
 class SystemBondEventSource(private val context: Context) : BondEventSource {
 

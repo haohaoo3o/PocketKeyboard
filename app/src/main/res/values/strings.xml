@@ -31,6 +31,11 @@
     <string name="pairing_devices_title">已配对设备</string>
     <string name="pairing_devices_empty">暂无已配对设备</string>
     <string name="pairing_devices_empty_unconfirmed">设备确认平台类型后会显示在这里</string>
+    <!-- 新发现分区：系统已 bond 但还没选平台（如在系统设置里刚配对的 Mac） -->
+    <string name="pairing_new_devices_title">新发现的设备</string>
+    <string name="pairing_new_devices_empty">暂无新发现的设备</string>
+    <!-- 已连接标识：HID registry 里已连接的 HID 对端（已配对 ≠ 已连接） -->
+    <string name="pairing_device_connected">已连接</string>
     <string name="pairing_device_platform_apple">苹果设备</string>
     <string name="pairing_device_platform_other">其他设备</string>
     <string name="pairing_device_active">当前控制目标</string>
@@ -41,6 +46,17 @@
     <string name="pairing_platform_dialog_cancel">取消</string>
     <string name="pairing_platform_icon_apple">苹果设备图标</string>
     <string name="pairing_platform_icon_other">其他设备图标</string>
+    <!-- 长按设备行：重新选择平台（键盘布局随之切换） -->
+    <string name="pairing_platform_dialog_reselect_title">重新选择平台类型</string>
+    <string name="pairing_platform_dialog_reselect_message">针对「%1$s」重新选择平台类型，键盘布局会随之切换。</string>
+    <!-- 侧滑删除：露出删除操作 → 二次确认 → removeBond + 清平台记录 -->
+    <string name="pairing_device_delete">删除</string>
+    <string name="pairing_device_delete_description">删除设备</string>
+    <string name="pairing_delete_confirm_title">解除配对？</string>
+    <string name="pairing_delete_confirm_message">将解除与「%1$s」的配对，键鼠控制会立即断开；之后需要在对端蓝牙菜单里重新选择「口袋键鼠」才能再次使用。</string>
+    <string name="pairing_delete_confirm_action">解除配对</string>
+    <string name="pairing_delete_confirm_cancel">取消</string>
+    <string name="pairing_delete_failed">删除失败，请稍后再试</string>
 
     <!-- 键盘页 -->
     <string name="keyboard_title">键盘</string>
@@ -298,4 +314,25 @@
     <string name="cd_kp_clear">清空</string>
     <string name="cd_kp_backspace">退格</string>
     <string name="cd_kp_enter">回车</string>
+
+    <!-- ============================================================
+         竖屏融合页（app/src/main/java/com/pocketkeyboard/app/keyboard/FusedControlScreen.kt）
+         中部：系统输入法唤起区（不可见 BasicTextField）；底部：可锁定修饰键排
+         ============================================================ -->
+
+    <!-- 系统输入法唤起区 -->
+    <string name="fused_ime_hint">点此唤起系统键盘</string>
+    <string name="cd_fused_ime_input">文本输入区，点此弹出系统键盘，输入内容会发送到被控设备</string>
+
+    <!-- 可锁定修饰键排（Windows 平台：ctrl / win / alt；苹果平台：control / option / ⌘） -->
+    <string name="fused_mod_ctrl">ctrl</string>
+    <string name="fused_mod_control">control</string>
+    <string name="fused_mod_shift">shift</string>
+    <string name="fused_mod_fn">fn</string>
+    <string name="fused_mod_win">win</string>
+    <string name="fused_mod_alt">alt</string>
+    <string name="fused_mod_option">option</string>
+    <string name="fused_mod_cmd">⌘</string>
+    <string name="fused_mod_tab">tab</string>
+    <string name="fused_mod_esc">esc</string>
 </resources>

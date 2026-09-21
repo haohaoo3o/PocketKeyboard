@@ -37,9 +37,20 @@ import android.util.Log
  *  └─ HidReportFactory 构造报告 → gateway.sendReport(activeDevice, reportId, data)
  * ```
  *
- * ## 配对（SSP）
- * 见 `SystemBondEventSource` 的说明：Android 无法完全自定义 HID 配对码输入流程，
- * 采用系统标准 SSP（数字比较 / Just Works），本层负责把 bond 广播与配对框数字桥接给 UI。
+ * ## 配对（SSP + 自动应答，Bug 2a）
+ * Android 无法完全自定义系统配对 UI，但**可以代劳应答**：被控端发起配对时系统发出
+ * `BluetoothDevice.ACTION_PAIRING_REQUEST`（由 [SystemBondEventSource] 在 hid 包内注册
+ * 接收，`RECEIVER_NOT_EXPORTED` + `BLUETOOTH_CONNECT` 权限防护），本类在
+ * [onBondEvent] 里按 variant 交给 [SystemPairingResponder]：
+ * - `PASSKEY_ENTRY` / `PIN`：反射 `device.setPin(App 配对码)`，被控端输入 App 展示的
+ *   6 位码即可完成配对（不再依赖用户在系统 SSP 对话框两边确认）；
+ * - `PASSKEY_CONFIRMATION` / `CONSENT`：反射 `device.setPairingConfirmation(true)` 自动确认。
+ *
+ * 前置条件：**App 处于前台且 HID 外设已注册**（[appInForeground] + [isAppRegistered]）；
+ * 任一不满足、或反射失败（[PairingAnswer.FAILED] / [PairingAnswer.SKIPPED]）时不做任何
+ * 补救，系统配对对话框照常弹出，用户按原流程手动完成——绝不崩溃。
+ * bond 成功后沿用原有链路：`ACTION_BOND_STATE_CHANGED(BONDED)` → registry 登记 →
+ * `connectHost`，并经 bridge 更新 MainViewModel 的配对码与连接状态。
  *
  * ## 多设备
  * - [HidHostRegistry] 维护已连接主机集合与连接顺序；
@@ -62,6 +73,8 @@ class HidDeviceTransport(
     private val gateway: HidProfileGateway,
     private val bondEventSource: BondEventSource,
     private val reconnectScheduler: ReconnectScheduler = HandlerReconnectScheduler(),
+    private val pairingResponder: PairingResponder = NoOpPairingResponder(),
+    private val appInForeground: () -> Boolean = { true },
 ) : HidTransport, HidProfileCallback {
 
     /**
@@ -79,6 +92,13 @@ class HidDeviceTransport(
         gateway = SystemHidProfileGateway(context, bluetoothManager),
         bondEventSource = SystemBondEventSource(context),
         reconnectScheduler = HandlerReconnectScheduler(),
+        // Bug 2a：配对码自动应答。配对码来源是 bridge（读 MainViewModel.pinCode），
+        // 因此这里按接口转型，非 bridge 的 listener（纯测试）传 null → 不抢系统的配对框。
+        pairingResponder = SystemPairingResponder(
+            pinCodeProvider = statusListener as? PairingPinProvider,
+            targetProvider = ReflectionPairingTargetProvider(context),
+        ),
+        appInForeground = SystemAppVisibility(context)::isForeground,
     )
 
     private val lock = Any()
@@ -137,6 +157,7 @@ class HidDeviceTransport(
         gateway.close()
         statusListener.onAppRegistrationChanged(false)
         statusListener.onActiveDeviceChanged(null)
+        publishConnectedHosts()
     }
 
     override fun sendKeyboardReport(modifiers: Int, keyCodes: ByteArray) {
@@ -262,6 +283,7 @@ class HidDeviceTransport(
         if (registered) {
             refreshBondedDevices()
             refreshConnectedHosts()
+            publishConnectedHosts()
             if (pluggedDeviceAddress != null) {
                 synchronized(lock) { registry.setActive(pluggedDeviceAddress) }
                 statusListener.onActiveDeviceChanged(
@@ -272,6 +294,7 @@ class HidDeviceTransport(
             }
         } else {
             statusListener.onActiveDeviceChanged(null)
+            publishConnectedHosts()
         }
     }
 
@@ -306,6 +329,7 @@ class HidDeviceTransport(
             }
             if (isDisconnected && isBonded) scheduleReconnect(address)
         }
+        publishConnectedHosts()
     }
 
     override fun onGetReport(address: String, type: Int, reportId: Int, bufferSize: Int) {
@@ -364,6 +388,7 @@ class HidDeviceTransport(
         }
         statusListener.onHostDisconnected(address)
         scheduleReconnect(address)
+        publishConnectedHosts()
     }
 
     // ============================================================ 内部实现
@@ -391,11 +416,24 @@ class HidDeviceTransport(
     private fun onBondEvent(event: BondEvent) {
         when (event) {
             is BondEvent.BondStateChanged -> onBondStateChanged(event.address, event.state)
-            is BondEvent.PairingRequest -> statusListener.onPairingRequest(
-                event.address,
-                event.variant,
-                event.pinOrPasskey,
-            )
+            is BondEvent.PairingRequest -> {
+                // Bug 2a：ACTION_PAIRING_REQUEST 到达后先尝试按 variant 自动应答。
+                // 前置条件（前台 + HID 已注册）不满足时直接跳过——系统配对框是兜底，
+                // 用户仍可手动确认；反射失败同样回退系统框（见 SystemPairingResponder）。
+                if (isAppRegistered && appInForeground()) {
+                    val answer = pairingResponder.answer(
+                        event.address,
+                        event.variant,
+                        event.pinOrPasskey,
+                    )
+                    Log.i(TAG, "pairing auto-answer for ${event.address}: $answer")
+                }
+                statusListener.onPairingRequest(
+                    event.address,
+                    event.variant,
+                    event.pinOrPasskey,
+                )
+            }
             is BondEvent.AdapterStateChanged -> onAdapterStateChanged(event.enabled)
         }
     }
@@ -466,6 +504,18 @@ class HidDeviceTransport(
             }
         }
         statusListener.onPairedDevicesChanged(pairedDeviceInfos())
+    }
+
+    /**
+     * 推送「当前已连接 HID 对端」全量快照（Bug 2b：配对页的「已连接」标识数据源）。
+     *
+     * 在一切可能改变连接集合的路径之后调用：连接状态变化、注册 / 注销、虚拟线缆拔掉、
+     * stop()。用快照而不是依赖 onHostConnected/onHostDisconnected 的增量，避免漏事件
+     * 导致 UI 标识与真实状态漂移。
+     */
+    private fun publishConnectedHosts() {
+        val connected = synchronized(lock) { registry.connectedAddresses() }
+        statusListener.onConnectedDevicesChanged(connected.toSet())
     }
 
     /** 用 `BluetoothHidDevice.getConnectedDevices()` 刷新已连接列表。 */

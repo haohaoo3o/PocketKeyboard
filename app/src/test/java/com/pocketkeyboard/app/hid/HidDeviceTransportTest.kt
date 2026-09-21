@@ -153,6 +153,7 @@ class HidDeviceTransportTest {
         var unavailable: HidUnavailableReason? = null
         val reconnecting = mutableListOf<Pair<String, Int>>()
         var leds: Triple<Boolean, Boolean, Boolean>? = null
+        var connectedAddresses: Set<String>? = null
 
         override fun onAppRegistrationChanged(registered: Boolean) {
             this.registered = registered
@@ -193,6 +194,25 @@ class HidDeviceTransportTest {
         override fun onLedStateChanged(numLock: Boolean, capsLock: Boolean, scrollLock: Boolean) {
             leds = Triple(numLock, capsLock, scrollLock)
         }
+
+        override fun onConnectedDevicesChanged(addresses: Set<String>) {
+            connectedAddresses = addresses
+        }
+    }
+
+    /** 记录调用的假配对应答器（Bug 2a 接线测试用）。 */
+    private class RecordingResponder : PairingResponder {
+        val calls = mutableListOf<Triple<String, HidPairingVariant, Int?>>()
+        var answer: PairingAnswer = PairingAnswer.PIN_ANSWERED
+
+        override fun answer(
+            address: String,
+            variant: HidPairingVariant,
+            passkey: Int?,
+        ): PairingAnswer {
+            calls.add(Triple(address, variant, passkey))
+            return answer
+        }
     }
 
     private val host = HidHost("AA:BB:CC:DD:EE:01", "iPhone", HidBondState.BONDED)
@@ -211,12 +231,16 @@ class HidDeviceTransportTest {
         gateway: FakeGateway = FakeGateway(),
         bondSource: FakeBondEventSource = FakeBondEventSource(),
         scheduler: FakeScheduler = FakeScheduler(),
+        responder: PairingResponder = NoOpPairingResponder(),
+        appInForeground: () -> Boolean = { true },
     ): Harness {
         val transport = HidDeviceTransport(
             statusListener = listener,
             gateway = gateway,
             bondEventSource = bondSource,
             reconnectScheduler = scheduler,
+            pairingResponder = responder,
+            appInForeground = appInForeground,
         )
         return Harness(transport, listener, gateway, bondSource, scheduler)
     }
@@ -583,6 +607,100 @@ class HidDeviceTransportTest {
         bondSource.emit(BondEvent.PairingRequest(host.address, HidPairingVariant.CONSENT, null))
 
         assertNull(listener.pairing?.third)
+    }
+
+    // ---------------------------------------------------------------- 配对自动应答（Bug 2a）
+
+    @Test
+    fun `pairing request is auto answered when hid app is registered and app in foreground`() {
+        val responder = RecordingResponder()
+        val h = harness(responder = responder)
+        val bondSource = h.bondSource
+        h.transport.start()
+        h.gateway.fireOpen()
+        // 注册成功后才允许自动应答（registerApp 本身要求 App 在前台）
+        h.gateway.appStatus(null, true)
+
+        bondSource.emit(
+            BondEvent.PairingRequest(host.address, HidPairingVariant.PASSKEY_ENTRY, null),
+        )
+
+        assertEquals(1, responder.calls.size)
+        assertEquals(host.address, responder.calls.single().first)
+        assertEquals(HidPairingVariant.PASSKEY_ENTRY, responder.calls.single().second)
+        // 应答结果不影响广播继续上报给 UI（bridge 仍据此刷新配对码）
+        assertNotNull(h.listener.pairing)
+    }
+
+    @Test
+    fun `pairing request is not auto answered before hid app registration`() {
+        val responder = RecordingResponder()
+        val h = harness(responder = responder)
+        h.transport.start()
+        h.gateway.fireOpen()
+
+        h.bondSource.emit(
+            BondEvent.PairingRequest(host.address, HidPairingVariant.CONSENT, null),
+        )
+
+        assertTrue(responder.calls.isEmpty())
+        // 不代劳 ≠ 不桥接：UI 仍然收到配对请求
+        assertNotNull(h.listener.pairing)
+    }
+
+    @Test
+    fun `pairing request is not auto answered when app is in background`() {
+        val responder = RecordingResponder()
+        val h = harness(responder = responder, appInForeground = { false })
+        h.transport.start()
+        h.gateway.fireOpen()
+        h.gateway.appStatus(null, true)
+
+        h.bondSource.emit(
+            BondEvent.PairingRequest(host.address, HidPairingVariant.PASSKEY_CONFIRMATION, 123456),
+        )
+
+        assertTrue(responder.calls.isEmpty())
+        assertNotNull(h.listener.pairing)
+    }
+
+    // ---------------------------------------------------------------- 已连接对端快照（Bug 2b）
+
+    @Test
+    fun `connected hosts snapshot is published on connect and disconnect`() {
+        val h = harness()
+        val transport = h.transport
+        val listener = h.listener
+        val gateway = h.gateway
+        transport.start()
+        gateway.fireOpen()
+        gateway.bonded.add(host)
+        gateway.appStatus(null, true)
+        assertEquals(emptySet<String>(), listener.connectedAddresses)
+
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+        assertEquals(setOf(host.address), listener.connectedAddresses)
+
+        gateway.connectionState(host.address, HidHostRegistry.STATE_DISCONNECTED)
+        assertEquals(emptySet<String>(), listener.connectedAddresses)
+    }
+
+    @Test
+    fun `stop clears the connected hosts snapshot`() {
+        val h = harness()
+        val transport = h.transport
+        val listener = h.listener
+        val gateway = h.gateway
+        transport.start()
+        gateway.fireOpen()
+        gateway.bonded.add(host)
+        gateway.appStatus(null, true)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+        assertEquals(setOf(host.address), listener.connectedAddresses)
+
+        transport.stop()
+
+        assertEquals(emptySet<String>(), listener.connectedAddresses)
     }
 
     @Test

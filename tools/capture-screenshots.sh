@@ -91,23 +91,20 @@ show_dock() { # show_dock <滑动起点纵坐标>
 echo "==> 1/4 配对页（dock 常显）"
 shot cap_pairing.png 01_pairing.png
 
-echo "==> 2/4 键盘页（竖屏融合布局：上半触控板 + 下半 26 键 QWERTY）"
+echo "==> 2/4 键盘页（竖屏融合布局：上触控板 + 系统输入法唤起区 + 可锁定修饰键排）"
 adb -s "$DEV" shell input tap "$NAV_KEYBOARD_X" "$NAV_Y"
 sleep 2
 shot cap_keyboard.png 02_keyboard.png
 
-echo "==> 3/4 触控板页（横屏全屏触控板）"
-# 转到横屏（manifest 声明 configChanges，旋转不重建 Activity；自动旋转上面已关）
-adb -s "$DEV" shell settings put system user_rotation 1
-sleep 2
-show_dock 540
-adb -s "$DEV" shell input tap "$LAND_NAV_TRACKPAD_X" "$LAND_NAV_Y"
-sleep 2
+echo "==> 3/4 融合页 + 系统输入法弹出（点输入区唤起手机输入法）"
+# 输入区提示文字位置（1080x2400 竖屏），点击后弹出系统输入法
+adb -s "$DEV" shell input tap 540 2148
+sleep 3
 shot cap_trackpad.png 03_trackpad.png
-
-echo "==> 4/4 数字小键盘（竖屏触控板页 + 123 sheet）"
-adb -s "$DEV" shell settings put system user_rotation 0
+adb -s "$DEV" shell input keyevent 4   # 收起系统键盘
 sleep 2
+
+echo "==> 4/4 数字小键盘（融合页右上角 123 sheet）"
 adb -s "$DEV" shell input tap "$NUMPAD_BTN_X" "$NUMPAD_BTN_Y"
 sleep 2
 shot cap_numpad.png 04_numpad.png

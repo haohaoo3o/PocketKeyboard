@@ -24,8 +24,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -83,8 +85,8 @@ import kotlin.math.roundToInt
  *
  * 页面由 [MainViewModel] 的 mode 驱动切换：
  * PAIRING -> PairingScreen；KEYBOARD / NUMPAD / TRACKPAD -> 竖屏为融合控制页
- * （[FusedControlScreen]，上半触控板 + 下半 26 键 QWERTY）、横屏分别为
- * KeyboardScreen（87 键 TKL 全屏）/ TrackpadScreen（全屏触控板）。
+ * （[FusedControlScreen]，上半触控板 + 中部系统输入法唤起区 + 底部可锁定修饰键排）、
+ * 横屏分别为 KeyboardScreen（87 键 TKL 全屏）/ TrackpadScreen（全屏触控板）。
  * 页面之间用 `AnimatedContent` + 苹果式 spring 曲线做推拉转场（见 gesture 包的
  * [applePageTransitionSpec]），**不直接操作 NavHost**。
  *
@@ -120,7 +122,22 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 应用根 Composable：权限申请 + 五指挥势层 + 页面容器 + dock 覆盖层。 */
+/**
+ * 应用根 Composable：权限申请 + 五指挥势层 + 页面容器 + dock 覆盖层。
+ *
+ * ## 状态栏 / 刘海避让（需求 1）
+ *
+ * `enableEdgeToEdge` 让页面背景延伸到屏幕边缘（纯黑背景的观感要求），内容避让由
+ * **页面根部**各自完成：
+ * - 配对页 / 横屏触控板页归其他工程师，在本文件的调用点包
+ *   `statusBarsPadding() + displayCutoutPadding()`（insets 会被消费，页面内部
+ *   即使也做避让不会双重留白）；
+ * - 竖屏融合页（[FusedControlScreen]）/ 横屏 87 键键盘页（[KeyboardScreen]）
+ *   在自己的根部做同一处理；
+ * - dock 覆盖层是 Material3 [NavigationBar]，自带 `windowInsets`（横向 systemBars
+ *   + 底部 navigationBars），无需额外处理；底部系统手势条由页面容器的
+ *   `navigationBarsPadding()` 统一让出。
+ */
 @Composable
 private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
@@ -279,13 +296,20 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
             ) { currentMode ->
                 when (currentMode) {
                     AppMode.PAIRING -> PairingScreen(
-                        modifier = Modifier.fillMaxSize(),
+                        // 需求 1：配对页根部预留状态栏 / 刘海空间。配对页归配对工程师，
+                        // 这里在调用点包一层（insets 会被消费，页面内部即使也做避让
+                        // 也不会双重留白），edge-to-edge 保留
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding()
+                            .displayCutoutPadding(),
                         viewModel = viewModel,
                         hidController = hidController,
                     )
 
-                    // 竖屏：两种 mode 都是融合布局（触控板 + 26 键），mode 状态照常切换，
-                    // 只是视觉不再变化——五指收缩 / 张开在竖屏已无页面可切
+                    // 竖屏：两种 mode 都是融合布局（触控板 + 系统输入法唤起区 +
+                    // 可锁定修饰键排），mode 状态照常切换，只是视觉不再变化——
+                    // 五指收缩 / 张开在竖屏已无页面可切
                     AppMode.KEYBOARD, AppMode.NUMPAD ->
                         if (landscape) {
                             KeyboardScreen(
@@ -306,7 +330,12 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
                     AppMode.TRACKPAD ->
                         if (landscape) {
                             TrackpadScreen(
-                                modifier = Modifier.fillMaxSize(),
+                                // 需求 1：触控板页根部预留状态栏 / 刘海空间（同配对页，
+                                // 在调用点包一层，不动 trackpad 包代码）
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .statusBarsPadding()
+                                    .displayCutoutPadding(),
                                 viewModel = viewModel,
                                 arbiter = arbiter,
                                 transport = hidController.transport,

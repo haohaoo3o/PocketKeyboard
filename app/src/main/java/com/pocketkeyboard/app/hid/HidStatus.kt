@@ -112,6 +112,15 @@ interface HidStatusListener {
     /** 某个 HID 主机断开。 */
     fun onHostDisconnected(address: String) {}
 
+    /**
+     * 当前已连接 HID 对端地址集合变化（Bug 2b：配对页据此显示「已连接」标识）。
+     *
+     * 与 [onHostConnected] / [onHostDisconnected] 的区别：这两个回调是「事件」，
+     * 漏一个就会与真实状态漂移；本回调是 registry 当前状态的**全量快照**，
+     * 任何导致连接集合变化的路径（连接 / 断开 / 蓝牙关闭 / unregisterApp）都会推送。
+     */
+    fun onConnectedDevicesChanged(addresses: Set<String>) {}
+
     /** 当前控制目标变化；null 表示无可用目标。 */
     fun onActiveDeviceChanged(device: HidDeviceInfo?) {}
 

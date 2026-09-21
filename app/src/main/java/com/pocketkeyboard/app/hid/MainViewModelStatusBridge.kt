@@ -14,19 +14,26 @@ import kotlinx.coroutines.flow.asStateFlow
  * 设计约束：
  * - 本层**不直接操作 UI**，也不持有 Activity / View；
  * - 只调用 `MainViewModel` 既有的 setter（`setPinCode` / `setPairedDevices` /
- *   `setActiveDevice`），不改契约字段；
+ *   `setActiveDevice` / `setConnectedDeviceAddresses`），不改契约字段；
  * - 平台判定线索（[HidDeviceInfo.platform]）在这里转成 UI 契约的
  *   [DevicePlatform]；无法判定时保守地给 [DevicePlatform.OTHER]，
  *   由配对页首次连接时的平台选择 Dialog 纠正并持久化。
+ *
+ * 本类同时实现 [PairingPinProvider]：配对码自动应答（Bug 2a）需要知道「App 当前展示的
+ * 6 位配对码」，这个值的唯一来源就是 `MainViewModel.pinCode`，因此由 bridge 直接提供，
+ * 避免 hid 层反向依赖 UI。
  */
 class MainViewModelStatusBridge(
     private val viewModel: MainViewModel,
-) : HidStatusListener {
+) : HidStatusListener, PairingPinProvider {
 
     private val _unavailableReason = MutableStateFlow<HidUnavailableReason?>(null)
 
     /** 最近一次「连接不可用」原因；UI 可据此展示中文提示。 */
     val unavailableReason: StateFlow<HidUnavailableReason?> = _unavailableReason.asStateFlow()
+
+    override val pairingPinCode: String?
+        get() = viewModel.pinCode.value
 
     override fun onAppRegistrationChanged(registered: Boolean) {
         // MainViewModel 契约里没有单独的注册状态字段，注册结果通过设备列表 /
@@ -56,6 +63,11 @@ class MainViewModelStatusBridge(
         }
     }
 
+    override fun onConnectedDevicesChanged(addresses: Set<String>) {
+        // Bug 2b：registry 里已连接的 HID 对端，配对页据此显示「已连接」标识
+        viewModel.setConnectedDeviceAddresses(addresses)
+    }
+
     override fun onActiveDeviceChanged(device: HidDeviceInfo?) {
         viewModel.setActiveDevice(device?.toPairedDevice())
     }
@@ -68,10 +80,18 @@ class MainViewModelStatusBridge(
     }
 
     override fun onPairingRequest(address: String, variant: HidPairingVariant, pinOrPasskey: Int?) {
-        // 配对码兜底显示：系统配对对话框是 Android 上唯一可信来源，
-        // 这里把系统广播里的 6 位数字原样转给 UI。
-        // Just Works（CONSENT）没有数字，此时 pinCode 置空，UI 显示「等待确认」。
-        viewModel.setPinCode(pinOrPasskey?.let { String.format(Locale.US, "%06d", it) })
+        // 配对码展示策略（Bug 2a）：
+        // - PASSKEY_ENTRY / PIN：SystemPairingResponder 用 App 配对码自动应答，被控端要输入
+        //   的就是 App 屏幕上那个码，因此优先展示 App 配对码；App 侧没有码时才退回系统广播值；
+        // - 数字比较 / Just Works：没有需要用户输入的数字，只展示系统广播带来的数字（没有则
+        //   清空显示占位），确认由 App 自动完成，用户无需再点。
+        val appPin = viewModel.pinCode.value?.takeIf { it.isNotBlank() }
+        val systemPin = pinOrPasskey?.let { String.format(Locale.US, "%06d", it) }
+        val display = when (variant) {
+            HidPairingVariant.PIN, HidPairingVariant.PASSKEY_ENTRY -> appPin ?: systemPin
+            else -> systemPin
+        }
+        viewModel.setPinCode(display)
     }
 
     override fun onUnavailable(reason: HidUnavailableReason) {

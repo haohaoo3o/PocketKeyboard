@@ -37,10 +37,20 @@ class DevicePlatformStore(context: Context) {
         }.toMap()
     }
 
-    /** 写入某设备的平台选择（首次连接时询问所得）。 */
+    /** 写入某设备的平台选择（首次连接时询问所得 / 长按重选）。 */
     suspend fun set(address: String, platform: DevicePlatform) {
         dataStore.edit { preferences ->
             preferences[platformKey(address)] = platform.name
+        }
+    }
+
+    /**
+     * 删除某设备的平台记录（Bug 3：侧滑删除设备后清掉，避免再次 bond 同一设备时
+     * 直接继承旧平台选择而不再询问）。
+     */
+    suspend fun remove(address: String) {
+        dataStore.edit { preferences ->
+            preferences.remove(platformKey(address))
         }
     }
 

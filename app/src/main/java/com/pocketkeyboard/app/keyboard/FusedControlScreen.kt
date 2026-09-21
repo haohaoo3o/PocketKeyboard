@@ -1,19 +1,24 @@
 package com.pocketkeyboard.app.keyboard
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -21,14 +26,27 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,7 +77,7 @@ import com.pocketkeyboard.app.ui.theme.PureWhite
 import kotlin.math.roundToInt
 
 /**
- * 竖屏融合控制页：上半触控板 + 下半 26 键手机输入法风格 QWERTY。
+ * 竖屏融合控制页（Bug 6 改造后）：上半触控板 + 中部系统输入法唤起区 + 底部可锁定修饰键排。
  *
  * 目录：app/src/main/java/com/pocketkeyboard/app/keyboard/
  *
@@ -72,42 +90,41 @@ import kotlin.math.roundToInt
  * │              ─┐                        │
  * │           左  │  右                    │  ← 底部短竖线分割的左右点击区（仅 Windows 模式）
  * │         当前控制设备名                   │
- * ├───────────────────────────────────────┤
- * │  Q W E R T Y U I O P                  │  ← 26 键 QWERTY（三行字母 10/9/7）
- * │   A S D F G H J K L                   │
- * │    Z X C V B N M                      │
- * │  ⇧  ⌫    空格    return                │  ← 底部功能行（shift / 退格 / 空格 / 回车）
+ * ├───────────────────────────────────────┤  ← 居中淡出的细分隔线
+ * │          点此唤起系统键盘（不可见输入框）  │  ← 系统输入法唤起区：BasicTextField
+ * ├───────────────────────────────────────┤  ← 居中淡出的细分隔线
+ * │ ctrl shift fn win/⌘ alt tab esc        │  ← 可锁定修饰键排（点击锁定 / 再点解锁）
  * └───────────────────────────────────────┘
  * ```
  *
  * 竖屏下 KEYBOARD 与 TRACKPAD 两种 mode 都展示本页（五指收缩 / 张开照常切换 mode，
- * 但视觉不再变化，因为两边的布局已经融合）。
+ * 但视觉不再变化，因为两边的布局已经融合）。横屏仍是全屏 87 键 TKL（[KeyboardScreen]）
+ * 与全屏触控板（trackpad 包的 TrackpadScreen），本页不参与。
+ *
+ * ## 为什么不再自己做 26 键 QWERTY（Bug 6）
+ *
+ * 自研的 26 键手机布局在真机上被系统输入法全面压制：没有中文、没有 Emoji、没有
+ * 联想纠错、符号页残缺。改造后字符输入**完全交给手机系统输入法**：本页只在中间
+ * 放一个不可见的 `BasicTextField` 作为「文本入口」，用户点它弹出系统输入法，
+ * 输入内容经 InputConnection 落到文本框后，由 [ImeTextDiff] 差分出「追加 / 删除」，
+ * 再逐字符经 `HidUsageMapper` 映射成 HID usage 发给被控设备（输入框随即清空）。
  *
  * ## 尺寸分配策略
  *
- * - 触控板区占 [FusedMetrics.TRACKPAD_HEIGHT_FRACTION]（0.42），26 键键盘占其余 0.58：
- *   触控板是「指向 / 滚动」的主战场，需要足够大的滑动行程；键盘四行等分剩余高度，
- *   每行约 0.58 × 屏高 / 4，在常见竖屏（约 870dp 高）上约 126dp/行，键帽高度充裕；
- * - 26 键键盘每行 u 总宽都是 [PhoneQwertyLayout.ROW_U]（10u）：第二 / 第三行字母用
- *   两侧留白（0.5u / 1.5u）把 9 / 7 颗字母居中对齐，行内按 weight 归一化填满屏宽，
- *   因此字母键宽三行一致、功能行与字母行宽度基准相同（Gboard 的同款做法）；
- * - 触控板区底部的左右点击区与分割线**全部复用触控板页的同一批组件**
- *   （[clickZones] 几何 + [TrackpadClickZone] 点击区 + [TrackpadDivider] 短竖线）：
- *   手势层判定与视觉画的是同一块区域，不会「看到的和摸到的」不一致；
- *   触控板工程师若调整该规格，本页自动跟随。
+ * - 触控板区占满剩余空间（`weight(1f)`）：它是「指向 / 滚动」的主战场，系统输入法
+ *   弹出时（`Modifier.imePadding`）也是被压缩的对象，给它最大弹性；
+ * - 输入区 [FusedMetrics.IME_INPUT_HEIGHT] 与修饰键排 [FusedMetrics.MODIFIER_ROW_HEIGHT]
+ *   用固定高度：系统输入法弹出后它们必须完整落在输入法上方，固定高度不会随
+ *   剩余空间变形；
+ * - 修饰键排 7 颗等宽（ctrl / shift / fn / win-option / alt-cmd / tab / esc），
+ *   键帽直接用键盘页的 [KeyCap]（渐变分隔细线 + 按压下陷 + 触觉 + ≥5 指针放行
+ *   五指挥势层），与横屏 87 键同一套观感。
  *
- * ## 26 键 QWERTY 的参考来源（联网调研，2026-09）
+ * ## 输入法弹出时的避让
  *
- * - **FlorisBoard**（github.com/florisboard/florisboard，Kotlin，约 6.7k star）：
- *   字母三行 + 独立功能行的结构、shift 的「按住生效 / 轻点粘滞」双模式、
- *   键帽以 u 比例描述宽度、行内按权重归一化填满屏宽的做法；
- * - **Simple Keyboard**（SimpleMobileTools，约 2k star）与 **AnySoftKeyboard**
- *   （AnySoftKeyboard/AnySoftKeyboard，Java，约 3.4k star）：手机输入法经典的
- *   三行字母居中、第二 / 第三行两侧留白、底部 shift / 退格 / 空格 / 回车一字排开的
- *   键位比例（letter 1u、shift 与退格各 1.5u、空格 4u、回车 3u）。
- *
- * 交互按输入法惯例实现为**原生版本**：shift 轻点粘滞一次（下一次字母自动大写并解锁）、
- * 按住 shift 再按字母为组合大写、再次轻点取消粘滞；退格 / 空格 / 回车均为单发 usage。
+ * 页面根部挂 `Modifier.imePadding()`（`WindowInsets.ime`，API 30+ 跟随输入法
+ * 显示 / 隐藏动画同步插值）：输入法弹出时整页内容被顶到输入法上方，触控板
+ * **不会被输入法盖掉**；输入法收起后触控板恢复完整高度。
  *
  * ## 与其它模块的关系
  *
@@ -115,11 +132,11 @@ import kotlin.math.roundToInt
  *   [TrackpadGestureTracker]（经 [TrackpadHidActions] 发 HID 报告），与触控板页
  *   完全同一套识别逻辑；本文件**不 import TrackpadScreen**（那是触控板工程师的页面）；
  * - 按键报告统一走 [KeyboardReportEngine]（修饰键位图 + 最多 6 键同按），与键盘页 /
- *   小键盘同一引擎，不新建发送链路；
- * - 键帽直接用键盘页的 [KeyCap]（无缝黑底白字、按压下陷 + 触觉），
- *   键帽颜色 / 字号 / 震感偏好沿用键盘页的 DataStore（fn+C / fn+S / fn+V 调过即生效）；
- * - 每个键帽挂 `Modifier.pocketKeyGestures`：≥5 指针时放行给底层五指挥势层，
- *   因此五指挥手在融合页同样有效（详见 gesture/KeyPointerInput.kt）。
+ *   小键盘同一引擎，不新建发送链路；IME 转发路径走 `keyTap`（一次性按下 + 松开）；
+ * - fn 组合（fn + 空格 / C / S / V）与横屏 87 键共用 [FnComboActions]：锁定 fn 后
+ *   经系统输入法打出的空格 / c / s / v 触发的是同一批本机功能（背光 / 键帽颜色 /
+ *   字号 / 震感），不发给被控设备；
+ * - 键帽颜色 / 字号 / 震感偏好沿用键盘页的 DataStore（fn+C / fn+S / fn+V 调过即生效）。
  *
  * @param transport HID 传输实现。null 时本页自建 [HidController] 并随组合生命周期启停；
  *    若调用方统一持有 HidController（MainActivity 正是如此），把它传进来即可避免重复注册。
@@ -135,6 +152,7 @@ fun FusedControlScreen(
     val platform = activeDevice?.platform ?: DevicePlatform.OTHER
 
     val context = LocalContext.current
+    val view = LocalView.current
 
     // 键盘页偏好（颜色 / 字号 / 震感）：与键盘页、小键盘同一份 DataStore，
     // 否则 fn+C / fn+S 调过的偏好对本页不生效
@@ -150,12 +168,9 @@ fun FusedControlScreen(
     // 传输：调用方未提供时自建（启动 / 停止随本页组合生命周期）
     val effectiveTransport = transport ?: rememberFusedTransport(viewModel)
 
-    // 键盘报告引擎：26 键键盘与小键盘 sheet 共用同一引擎类型（各自一个实例，
+    // 键盘报告引擎：修饰键排与 IME 转发共用同一引擎（各自一个实例，
     // 修饰键位图互不影响；页面退出时统一 releaseAll 避免卡键）
     val keyboardEngine = remember(effectiveTransport) { KeyboardReportEngine(effectiveTransport) }
-    DisposableEffect(keyboardEngine) {
-        onDispose { keyboardEngine.releaseAll() }
-    }
 
     // 触控板手势 → HID：与触控板页同一翻译层
     val trackpadActions = remember(effectiveTransport) { TrackpadHidActions(effectiveTransport) }
@@ -175,10 +190,100 @@ fun FusedControlScreen(
     // 与触控板页约定一致——控制设备变化不被动收起，避免打断连续录入
     var numpadVisible by remember { mutableStateOf(false) }
 
+    // 可锁定修饰键的锁定集合（纯函数状态机见 [FusedModifierLatch]）
+    var lockedModifiers by remember { mutableStateOf(emptySet<LockableModifier>()) }
+
+    // fn 组合的本机功能（与横屏 87 键键盘页同一实现）
+    val scope = rememberCoroutineScope()
+    val fnComboLabels = rememberFnComboLabels()
+    var hud by remember { mutableStateOf<KeyboardHudRequest?>(null) }
+    val fnCombos = remember(context, preferencesStore, scope, fnComboLabels) {
+        FnComboActions(
+            context = context,
+            store = preferencesStore,
+            scope = scope,
+            labels = fnComboLabels,
+            currentPreferences = { preferences },
+            onHud = { request -> hud = request },
+        )
+    }
+
+    val vibrator = rememberFusedVibrator()
+    val keyCapColor = preferences.keyCapColor.toKeyCapTextColor()
+
+    // 页面退出（切模式 / 切页）时松开所有按住的键并解锁修饰键，避免卡键
+    DisposableEffect(keyboardEngine) {
+        onDispose {
+            keyboardEngine.releaseAll()
+            lockedModifiers = emptySet()
+        }
+    }
+
+    // ---------------------------------------------------------------- IME 转发 → HID 报告
+
+    /**
+     * 系统输入法提交了一个字符：
+     * 1. fn 锁定中 → 先试 fn 组合（本机功能，命中即清除 fn 锁定，与键盘页单次组合同理）；
+     * 2. 否则经 `HidUsageMapper` 查 usage，叠加**锁定的修饰键**位图一次性按下 + 松开；
+     * 3. 不可映射字符（中文、Emoji 等）直接丢弃——HID 键盘页面没有对应 usage。
+     */
+    fun onImeCommit(char: Char) {
+        if (FusedModifierLatch.fnActive(lockedModifiers)) {
+            if (fnCombos.run(char)) {
+                lockedModifiers = FusedModifierLatch.withoutFn(lockedModifiers)
+                performKeyHaptic(view, vibrator)
+                return
+            }
+            // fn + 其它字符：粘滞的 fn 只生效一次组合，清除后按普通字符发送
+            lockedModifiers = FusedModifierLatch.withoutFn(lockedModifiers)
+        }
+        val mapping = HidUsageMapper.usageForChar(char) ?: return
+        keyboardEngine.keyTap(
+            usage = mapping.usage,
+            extraModifiers = FusedModifierLatch.modifierBits(lockedModifiers),
+            momentaryShift = mapping.needsShift,
+        )
+    }
+
+    /** 输入框文本缩短：按字符数补发退格（锁定的修饰键一并叠加，如 Ctrl+退格删词）。 */
+    fun onImeBackspace(count: Int) {
+        val bits = FusedModifierLatch.modifierBits(lockedModifiers)
+        repeat(count) {
+            keyboardEngine.keyTap(usage = HidUsage.KEY_BACKSPACE, extraModifiers = bits)
+        }
+    }
+
+    /** 修饰键点击：切换锁定态（带触觉，视觉高亮由 [lockedModifiers] 驱动重组）。 */
+    fun onToggleModifier(modifier: LockableModifier) {
+        performKeyHaptic(view, vibrator)
+        lockedModifiers = FusedModifierLatch.toggle(lockedModifiers, modifier)
+    }
+
+    /** tab / esc 点击：直接发送 usage（不锁定；锁定的修饰键照常叠加）。 */
+    fun onDirectAction(action: KeyAction) {
+        performKeyHaptic(view, vibrator)
+        val usage = (action as? KeyAction.Usage)?.usage ?: return
+        keyboardEngine.keyTap(
+            usage = usage,
+            extraModifiers = FusedModifierLatch.modifierBits(lockedModifiers),
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(PureBlack),
+            .background(PureBlack)
+            // 需求 6：系统输入法弹出时把整页内容顶到输入法上方（WindowInsets.ime，
+            // API 30+ 跟随输入法显示 / 隐藏动画插值），触控板不会被输入法盖掉。
+            // **imePadding 必须排在 statusBarsPadding 之前**（modifier 链上更靠外）：
+            // Compose 的 WindowInsets.ime 值会扣掉已被消费的状态栏高度（真机实测差
+            // 一个状态栏高 80px），ime 在最外层按「窗口坐标」取值才不会少算，
+            // 否则输入法弹出时修饰键排会陷进输入法窗口下、点不到
+            .imePadding()
+            // 需求 1：页面根部预留状态栏 / 刘海空间（触控板右上角开关、设备名条都不被遮挡）；
+            // edge-to-edge 保留（纯黑背景仍延伸至屏幕边缘）
+            .statusBarsPadding()
+            .displayCutoutPadding(),
     ) {
         Column(
             modifier = Modifier.fillMaxSize(),
@@ -193,15 +298,24 @@ fun FusedControlScreen(
                 onNumpadToggle = { numpadVisible = true },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(FusedMetrics.TRACKPAD_HEIGHT_FRACTION),
+                    .weight(1f),
             )
-            FusedPhoneKeyboard(
-                engine = keyboardEngine,
-                textColor = preferences.keyCapColor.toKeyCapTextColor(),
-                textSize = preferences.keyTextSize,
+            FusedImeInputArea(
+                onCommitChar = ::onImeCommit,
+                onBackspace = ::onImeBackspace,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f - FusedMetrics.TRACKPAD_HEIGHT_FRACTION),
+                    .height(FusedMetrics.IME_INPUT_HEIGHT),
+            )
+            FusedModifierRow(
+                platform = platform,
+                locked = lockedModifiers,
+                onToggleModifier = ::onToggleModifier,
+                onDirectAction = ::onDirectAction,
+                textColor = keyCapColor,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(FusedMetrics.MODIFIER_ROW_HEIGHT),
             )
         }
 
@@ -209,9 +323,15 @@ fun FusedControlScreen(
         NumpadSheet(
             visible = numpadVisible,
             transport = effectiveTransport,
-            textColor = preferences.keyCapColor.toKeyCapTextColor(),
+            textColor = keyCapColor,
             textSize = preferences.keyTextSize,
             onDismiss = { numpadVisible = false },
+        )
+
+        // fn 组合 HUD（屏幕中央、iOS 风格）：与横屏 87 键同一组件；对触摸完全透明
+        KeyboardHudLayer(
+            hud = hud,
+            onDismiss = { hud = null },
         )
     }
 }
@@ -219,8 +339,14 @@ fun FusedControlScreen(
 /** 融合页的尺寸常量（dp / 比例）。UI 布局与手势几何共用，避免两边算出的区域不一致。 */
 internal object FusedMetrics {
 
-    /** 触控板区高度占融合页的比例；其余比例给 26 键键盘。 */
-    const val TRACKPAD_HEIGHT_FRACTION: Float = 0.42f
+    /**
+     * 系统输入法唤起区高度（固定值）：系统输入法弹出后该区域必须完整落在输入法
+     * 上方，用固定高度而不是 weight，避免随剩余空间变形。
+     */
+    val IME_INPUT_HEIGHT = 56.dp
+
+    /** 可锁定修饰键排高度（固定值，同上）。 */
+    val MODIFIER_ROW_HEIGHT = 64.dp
 }
 
 /**
@@ -230,8 +356,8 @@ internal object FusedMetrics {
  * - 右上角「123」小键盘开关（复用 trackpad 包的 [NumpadToggleButton]）；
  * - 中部大面积触控区，挂 `Modifier.trackpadGestures`（1–4 指手势 + 与五指挥势层仲裁）；
  * - 底部（仅 Windows 模式）左右两个点击区，中间用一条短竖线分割；
- * - 最底部一条设备名（本页触控区不是屏幕最底部，系统手势条由下方的键盘区避让，
- *   因此设备名放触控区底部即可，不占用手势行程）。
+ * - 最底部一条设备名（本页触控区不是屏幕最底部，系统手势条由下方的输入区 / 修饰键排
+ *   避让，因此设备名放触控区底部即可，不占用手势行程）。
  */
 @Composable
 private fun FusedTrackpadArea(
@@ -310,9 +436,9 @@ private fun FusedTrackpadArea(
         }
 
         // 右上角：小键盘开关（复用触控板页同一组件，视觉与行为一致）。
-        // statusBarsPadding：开关贴在屏幕顶缘，不加状态栏内边距时按钮上半截被状态栏
-        // 盖住，MIUI 会拦截状态栏区域内的触摸（真机实测：点在按钮上部无响应），
-        // 加一层内边距让整个按钮落在可触摸区域内
+        // statusBarsPadding：开关贴在屏幕顶缘。页面根部已做状态栏避让（insets 已被
+        // 消费），这里再挂一层是幂等防御——万一根部的避让被调整，按钮仍不会被
+        // 状态栏盖住（MIUI 会拦截状态栏区域内的触摸，真机实测过）
         NumpadToggleButton(
             onClick = onNumpadToggle,
             modifier = Modifier
@@ -364,379 +490,347 @@ private fun FusedDeviceNameStrip(
 }
 
 /**
- * 融合页下半部分：26 键手机输入法风格 QWERTY。
+ * 融合页中部：系统输入法唤起区（Bug 6 核心）。
  *
- * 三行字母（10/9/7，行内两侧留白居中）+ 底部功能行（shift / 退格 / 空格 / 回车）。
- * 每行 u 总宽都是 [PhoneQwertyLayout.ROW_U]，行内按 weight 归一化填满屏宽。
+ * 一个**不可见**的 `BasicTextField`（文字 / 光标全透明）+ 未聚焦时的一行浅色提示。
+ * 点击该区域即取得焦点并弹出**手机系统输入法**；用户在系统输入法里打字（含中文、
+ * Emoji、符号页），文本变更经 InputConnection 落到本文本框：
  *
- * ## shift 行为（输入法惯例）
+ * - `commitText`（含自动改正、候选上屏）→ 文本变长：经 [ImeTextDiff] 差分出追加的
+ *   字符，逐字符查 `HidUsageMapper` 转发给被控设备，然后把输入框清回哨兵态；
+ * - `deleteSurroundingText` / 退格 → 文本缩短：按缩短的字符数补发退格 usage；
+ * - 组词中（`TextFieldValue.composition != null`，中文拼音中间态）→ **只跟手不转发**，
+ *   避免把 `n → ni → nihao` 这样的拼音中间态打给对端；候选真正上屏（composition
+ *   归 null）后才按上面的规则处理。
  *
- * - 轻点 shift → 粘滞：下一次字母发送大写（`needsShift`），用完立即解锁；
- * - 按住 shift 不放、再按字母 → 组合大写（修饰键位图），抬手后不粘滞；
- * - 粘滞状态下再轻点 shift → 取消粘滞；
- * - 被五指挥势作废时整体复位（补发松键，避免卡在 shift 上）。
+ * ## 零宽空格哨兵（[IME_SENTINEL]）
  *
- * 状态机是纯 Kotlin 的 [FusedShiftState]，可在 JVM 单测里逐条验证。
+ * 输入框清空后永远保留一个零宽空格（U+200B）：多数输入法在**空输入框**上按退格时
+ * 只会做「无可删」处理（不产生任何文本变更），退格就丢了；保留一个不可见字符后，
+ * 退格会把哨兵删掉 → 文本缩短 → 正常补发退格 usage，随后再补回哨兵。用户完全
+ * 看不到这个字符（零宽 + 文字颜色透明）。
+ *
+ * ## 弹出 / 收起
+ *
+ * - 弹出：输入框聚焦即由系统弹出输入法（Compose 默认行为），同时
+ *   [LocalSoftwareKeyboardController].show() 兜底（点提示区域等聚焦边缘场景）；
+ * - 收起：离开本页（切模式 / 切页）时 `clearFocus()` + `hide()`，输入法不会
+ *   留在屏幕上盖住下一个页面。
+ *
+ * @param onCommitChar 提交了一个字符（调用方负责 fn 组合、修饰键叠加与 HID 映射）
+ * @param onBackspace 文本缩短了 N 个字符（调用方补发 N 次退格）
  */
 @Composable
-private fun FusedPhoneKeyboard(
-    engine: KeyboardReportEngine,
+private fun FusedImeInputArea(
+    onCommitChar: (Char) -> Unit,
+    onBackspace: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusRequester = remember { FocusRequester() }
+    val contentDesc = stringResource(R.string.cd_fused_ime_input)
+    val hint = stringResource(R.string.fused_ime_hint)
+
+    // 输入框文本：恒定携带零宽空格哨兵（见 [IME_SENTINEL] 说明）
+    var value by remember {
+        mutableStateOf(TextFieldValue(IME_SENTINEL, TextRange(IME_SENTINEL.length)))
+    }
+    // 上一次「组词结束」时已处理的文本：组词期间不更新它，组词结束后一次性差分，
+    // 这样拼音中间态既不会被打给对端，也不会被误判成「删除」
+    var lastCommitted by remember { mutableStateOf(IME_SENTINEL) }
+    var focused by remember { mutableStateOf(false) }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        FusedSectionSeam()
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .background(PureBlack)
+                // 点区域任意位置（含提示文字）都能聚焦并唤起系统输入法
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                ) {
+                    focusRequester.requestFocus()
+                    keyboardController?.show()
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            BasicTextField(
+                value = value,
+                onValueChange = { next ->
+                    if (next.composition != null) {
+                        // 组词中（中文拼音等）：只跟手更新文本，不转发、不清框
+                        value = next
+                        return@BasicTextField
+                    }
+                    val actions = ImeTextDiff.diff(lastCommitted, next.text)
+                    // 转发后统一清回哨兵态：对端已收到这些字符，本框不再保留
+                    lastCommitted = IME_SENTINEL
+                    value = TextFieldValue(
+                        text = IME_SENTINEL,
+                        selection = TextRange(IME_SENTINEL.length),
+                    )
+                    actions.forEach { action ->
+                        when (action) {
+                            is ImeKeyAction.Backspace -> onBackspace(action.count)
+                            is ImeKeyAction.Commit -> onCommitChar(action.char)
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .focusRequester(focusRequester)
+                    .onFocusChanged { focused = it.isFocused }
+                    .semantics { this.contentDescription = contentDesc },
+                // 不可见：文字与光标全部透明（纯黑背景上完全看不出这是个输入框）
+                textStyle = TextStyle(color = Color.Transparent),
+                cursorBrush = SolidColor(Color.Transparent),
+                // 多行：回车键走「插入 \n」而不是 IME action，\n 由 HidUsageMapper
+                // 映射成 KEY_ENTER 发给对端
+                singleLine = false,
+                keyboardOptions = KeyboardOptions(),
+            )
+
+            // 未聚焦时的浅色提示（聚焦后隐藏，让位给系统输入法）
+            if (!focused) {
+                Text(
+                    text = hint,
+                    color = PureWhite.copy(alpha = 0.32f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+
+    // 离开页面时收起系统输入法并清除焦点，避免输入法盖住下一个页面
+    DisposableEffect(Unit) {
+        onDispose {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+        }
+    }
+}
+
+/** 零宽空格哨兵：输入框里恒定保留的不可见字符（退格捕获，见 [FusedImeInputArea] 说明）。 */
+private const val IME_SENTINEL = "\u200B"
+
+/** 融合页顶部分隔线：居中淡出的 1dp 细线（触控板 / 输入区 / 修饰键排三段之分界）。 */
+@Composable
+private fun FusedSectionSeam(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .drawBehind { drawCenteredFadingSeamLine(size.width, size.height) },
+    )
+}
+
+/**
+ * 融合页底部：一排**可锁定修饰键**（Bug 6）。
+ *
+ * - ctrl / shift / fn / win(⌘) / alt(option)：点击进入锁定态（整颗键帽高亮 + 触觉），
+ *   再点解锁；锁定期间经系统输入法提交的每个字符都带上对应修饰键位图
+ *   （锁定 ctrl 后打 c = Ctrl+C；锁定 shift 后打 a = A）；
+ * - fn：锁定视觉与其它修饰键一致，组合语义沿用横屏 87 键键盘页——锁定的 fn 被第一个
+ *   fn 组合（空格 / C / S / V）消费后即解锁（见 [FnComboActions]）；
+ * - tab / esc：不锁定，点击直接发送 usage（锁定的修饰键照常叠加，如 Ctrl+Tab）。
+ *
+ * 键帽复用键盘页的 [KeyCap]：渐变分隔细线（需求 5）、按压下陷 + 触觉、以及
+ * `pocketKeyGestures` 的「≥5 指针放行五指挥势层」仲裁，与横屏 87 键同一套交互。
+ */
+@Composable
+private fun FusedModifierRow(
+    platform: DevicePlatform,
+    locked: Set<LockableModifier>,
+    onToggleModifier: (LockableModifier) -> Unit,
+    onDirectAction: (KeyAction) -> Unit,
     textColor: Color,
-    textSize: KeyTextSize,
     modifier: Modifier = Modifier,
 ) {
     val view = LocalView.current
     val vibrator = rememberFusedVibrator()
+    val specs = remember(platform) { fusedModifierRow(platform) }
 
-    val rows = remember { PhoneQwertyLayout.rows() }
-    val shiftState = remember { FusedShiftState() }
-    var shiftActive by remember { mutableStateOf(false) }
-
-    // 页面退出（切模式 / 切页）时把 shift 状态与按住的键一起复位，避免卡键
-    DisposableEffect(engine) {
-        onDispose {
-            shiftState.reset()
-            engine.releaseAll()
-        }
-    }
-
-    fun onKeyDown(spec: KeySpec) {
-        performKeyHaptic(view, vibrator)
-        when (val action = spec.action) {
-            is KeyAction.Character -> {
-                val char = shiftState.charToSend(action.char)
-                shiftActive = shiftState.active
-                HidUsageMapper.usageForChar(char)?.let { mapping ->
-                    engine.keyDown(mapping.usage, mapping.needsShift)
-                }
-            }
-
-            is KeyAction.Usage -> engine.keyDown(action.usage)
-
-            is KeyAction.Modifier -> {
-                if (action.usage == HidUsage.KEY_LEFT_SHIFT) {
-                    shiftState.onShiftDown()
-                    shiftActive = true
-                }
-                engine.modifierDown(action.usage)
-            }
-
-            // 26 键布局没有 F 行 / fn 键，穷尽分支防御
-            is KeyAction.FunctionKey -> Unit
-            KeyAction.Fn -> Unit
-        }
-    }
-
-    fun onKeyUp(spec: KeySpec) {
-        when (val action = spec.action) {
-            is KeyAction.Character ->
-                HidUsageMapper.usageForChar(action.char)?.let { engine.keyUp(it.usage) }
-
-            is KeyAction.Usage -> engine.keyUp(action.usage)
-
-            is KeyAction.Modifier -> {
-                engine.modifierUp(action.usage)
-                if (action.usage == HidUsage.KEY_LEFT_SHIFT) {
-                    shiftState.onShiftUp()
-                    shiftActive = shiftState.active
-                }
-            }
-
-            is KeyAction.FunctionKey -> Unit
-            KeyAction.Fn -> Unit
-        }
-    }
-
-    fun onKeyAbandoned(spec: KeySpec) {
-        // 五指挥势作废本次按下：补发松键；shift 还要额外复位粘滞 / 按住状态
-        when (val action = spec.action) {
-            KeyAction.Fn -> Unit
-            is KeyAction.Modifier -> {
-                engine.modifierUp(action.usage)
-                if (action.usage == HidUsage.KEY_LEFT_SHIFT) {
-                    shiftState.reset()
-                    shiftActive = false
-                }
-            }
-
-            is KeyAction.Character ->
-                HidUsageMapper.usageForChar(action.char)?.let { engine.keyUp(it.usage) }
-
-            is KeyAction.Usage -> engine.keyUp(action.usage)
-            is KeyAction.FunctionKey -> Unit
-        }
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(PureBlack),
-    ) {
-        rows.forEach { row ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-            ) {
-                // 第二 / 第三行字母两侧的留白：把 9 / 7 颗字母居中对齐（Gboard 同款）
-                if (row.sideMarginU > 0f) {
-                    Spacer(
-                        modifier = Modifier
-                            .weight(row.sideMarginU)
-                            .fillMaxHeight(),
-                    )
-                }
-                row.keys.forEach { spec ->
-                    KeyCap(
-                        spec = spec,
-                        // shift 粘滞 / 按住时，shift 键帽（style = FN）整颗高亮
-                        fnActive = shiftActive && spec.action is KeyAction.Modifier &&
-                            spec.action.usage == HidUsage.KEY_LEFT_SHIFT,
-                        textColor = textColor,
-                        textSize = textSize,
-                        modifier = Modifier
-                            .weight(spec.widthU)
-                            .fillMaxHeight(),
-                        onPress = { onKeyDown(spec) },
-                        onRelease = { onKeyUp(spec) },
-                        onAbandoned = { onKeyAbandoned(spec) },
-                    )
-                }
-                if (row.sideMarginU > 0f) {
-                    Spacer(
-                        modifier = Modifier
-                            .weight(row.sideMarginU)
-                            .fillMaxHeight(),
-                    )
-                }
+    Column(modifier = modifier.fillMaxWidth()) {
+        FusedSectionSeam()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .background(PureBlack),
+        ) {
+            specs.forEach { spec ->
+                val active = spec.modifier != null && spec.modifier in locked
+                KeyCap(
+                    spec = spec.spec,
+                    fnActive = false,
+                    highlighted = active,
+                    showSeams = true,
+                    textColor = textColor,
+                    // 修饰键排是紧凑的固定高度 UI，字号不随 fn+S 偏好变化
+                    textSize = KeyTextSize.SMALL,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    onPress = {},
+                    onRelease = {
+                        if (spec.modifier != null) {
+                            onToggleModifier(spec.modifier)
+                        } else {
+                            onDirectAction(spec.spec.action)
+                        }
+                    },
+                    onAbandoned = {},
+                )
             }
         }
     }
 }
 
 /**
- * 26 键 QWERTY 的键位数据模型（纯 Kotlin，无 Compose / Android 依赖）。
+ * 修饰键排上的一颗键。
  *
- * 布局（每行 u 总宽都是 [ROW_U]，渲染时按行内 weight 归一化填满屏宽）：
- *
- * ```
- * 行 1（10u）：Q W E R T Y U I O P
- * 行 2（10u）：0.5u 留白 + A S D F G H J K L + 0.5u 留白
- * 行 3（10u）：1.5u 留白 + Z X C V B N M + 1.5u 留白
- * 行 4（10u）：shift(1.5u) ⌫(1.5u) space(4u) return(3u)
- * ```
- *
- * 字母键的 [KeyAction.Character] 一律用小写字符（发送链路由 `HidUsageMapper` 决定
- * 是否需要 Shift，与显示层的大写标签解耦）；shift 粘滞时经 [FusedShiftState] 换成大写。
+ * @param spec 键帽描述（文案 / 语义 / 风格）
+ * @param modifier 非空 = 可锁定修饰键（点击切换锁定态）；null = 直接发送键（tab / esc）
  */
-object PhoneQwertyLayout {
-
-    /** 每行 u 总宽（三行字母 + 功能行一致，保证键宽基准相同）。 */
-    const val ROW_U: Float = 10f
-
-    /** 第二行两侧留白（0.5u × 2 + 9 × 1u = 10u）。 */
-    const val TOP_ROW_MARGIN_U: Float = 0.5f
-
-    /** 第三行两侧留白（1.5u × 2 + 7 × 1u = 10u）。 */
-    const val BOTTOM_ROW_MARGIN_U: Float = 1.5f
-
-    /** shift / 退格宽（Gboard 同款 1.5u）。 */
-    const val SHIFT_U: Float = 1.5f
-
-    const val BACKSPACE_U: Float = 1.5f
-
-    /** 空格宽。 */
-    const val SPACE_U: Float = 4f
-
-    /** 回车宽。 */
-    const val ENTER_U: Float = 3f
-
-    /** 4 行键位（行 1 → 行 4）。 */
-    fun rows(): List<PhoneKeyRow> = listOf(
-        // 行 1：qwertyuiop
-        PhoneKeyRow(
-            keys = letterKeys("qwertyuiop"),
-            sideMarginU = 0f,
-        ),
-        // 行 2：asdfghjkl（两侧 0.5u 留白居中）
-        PhoneKeyRow(
-            keys = letterKeys("asdfghjkl"),
-            sideMarginU = TOP_ROW_MARGIN_U,
-        ),
-        // 行 3：zxcvbnm（两侧 1.5u 留白居中）
-        PhoneKeyRow(
-            keys = letterKeys("zxcvbnm"),
-            sideMarginU = BOTTOM_ROW_MARGIN_U,
-        ),
-        // 行 4：shift / 退格 / 空格 / 回车
-        PhoneKeyRow(
-            keys = listOf(shiftKey(), backspaceKey(), spaceKey(), enterKey()),
-            sideMarginU = 0f,
-        ),
-    )
-
-    private fun letterKeys(letters: String): List<KeySpec> =
-        letters.map { char ->
-            KeySpec(
-                labelRes = letterLabelRes(char),
-                action = KeyAction.Character(char),
-            )
-        }
-
-    /**
-     * 字母 → 键帽文案资源。
-     *
-     * 显示层一律大写（strings.xml 里 key_q = "Q"…），发送层用的是 [KeyAction.Character]
-     * 的小写字符，两边解耦：改显示不影响 `HidUsageMapper` 的输入映射。
-     */
-    private fun letterLabelRes(char: Char): Int = when (char) {
-        'q' -> R.string.key_q
-        'w' -> R.string.key_w
-        'e' -> R.string.key_e
-        'r' -> R.string.key_r
-        't' -> R.string.key_t
-        'y' -> R.string.key_y
-        'u' -> R.string.key_u
-        'i' -> R.string.key_i
-        'o' -> R.string.key_o
-        'p' -> R.string.key_p
-        'a' -> R.string.key_a
-        's' -> R.string.key_s
-        'd' -> R.string.key_d
-        'f' -> R.string.key_f
-        'g' -> R.string.key_g
-        'h' -> R.string.key_h
-        'j' -> R.string.key_j
-        'k' -> R.string.key_k
-        'l' -> R.string.key_l
-        'z' -> R.string.key_z
-        'x' -> R.string.key_x
-        'c' -> R.string.key_c
-        'v' -> R.string.key_v
-        'b' -> R.string.key_b
-        'n' -> R.string.key_n
-        'm' -> R.string.key_m
-        else -> error("26 键布局不支持的字母: $char")
-    }
-
-    /**
-     * shift 键：style = FN 是为了复用 [KeyCap] 的「fn 活跃时整颗高亮」视觉，
-     * 这里高亮条件换成 shift 粘滞 / 按住（见 FusedPhoneKeyboard 的 fnActive 实参）。
-     */
-    private fun shiftKey(): KeySpec = KeySpec(
-        labelRes = R.string.key_shift_l,
-        widthU = SHIFT_U,
-        action = KeyAction.Modifier(HidUsage.KEY_LEFT_SHIFT),
-        style = KeyStyle.FN,
-        contentDescRes = R.string.key_shift_l,
-    )
-
-    private fun backspaceKey(): KeySpec = KeySpec(
-        labelRes = R.string.key_backspace,
-        widthU = BACKSPACE_U,
-        action = KeyAction.Usage(HidUsage.KEY_BACKSPACE),
-        style = KeyStyle.MODIFIER,
-        contentDescRes = R.string.key_backspace,
-    )
-
-    private fun spaceKey(): KeySpec = KeySpec(
-        labelRes = R.string.key_space,
-        widthU = SPACE_U,
-        action = KeyAction.Usage(HidUsage.KEY_SPACE),
-        style = KeyStyle.MODIFIER,
-        contentDescRes = R.string.key_space,
-    )
-
-    private fun enterKey(): KeySpec = KeySpec(
-        labelRes = R.string.key_enter,
-        widthU = ENTER_U,
-        action = KeyAction.Usage(HidUsage.KEY_ENTER),
-        style = KeyStyle.MODIFIER,
-        contentDescRes = R.string.key_enter,
-    )
-}
+internal data class FusedModifierSpec(
+    val spec: KeySpec,
+    val modifier: LockableModifier?,
+)
 
 /**
- * 26 键键盘的一行：[keys] 从左到右排列，[sideMarginU] 为两侧留白（u）。
- */
-data class PhoneKeyRow(
-    val keys: List<KeySpec>,
-    val sideMarginU: Float,
-) {
-
-    /** 该行 u 总宽（含两侧留白；四行都等于 [PhoneQwertyLayout.ROW_U]）。 */
-    val totalU: Float
-        get() = keys.sumOf { it.widthU.toDouble() }.toFloat() + sideMarginU * 2f
-}
-
-/**
- * 26 键键盘 shift 键的状态机（纯 Kotlin，可单测）。
+ * 修饰键排的 7 颗键（随控制设备平台切换标签：Windows = ctrl/win/alt，
+ * 苹果 = control/option/⌘；shift / fn / tab / esc 两平台一致）。
  *
- * 规则（输入法惯例，参考 FlorisBoard 的 shift 双模式）：
- * - 按下 shift：进入「按住」态，修饰键位图置位（由调用方发 `modifierDown`）；
- * - 按住期间按过其它键 → 本次是组合，抬手后**不**粘滞；
- * - 按住期间没按过其它键 → 视为轻点，抬手时翻转粘滞态；
- * - 粘滞态下按字母：发送大写并立刻清除粘滞（单次生效）；
- * - 再次轻点 shift：翻转粘滞态（取消）。
+ * 顺序与需求一致：ctrl、shift、fn、win-option、alt-cmd、tab、esc。
  */
-internal class FusedShiftState {
+internal fun fusedModifierRow(platform: DevicePlatform): List<FusedModifierSpec> = when (platform) {
+    DevicePlatform.APPLE -> listOf(
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_control,
+                action = KeyAction.Modifier(HidUsage.KEY_LEFT_CONTROL),
+                style = KeyStyle.MODIFIER,
+                contentDescRes = R.string.fused_mod_control,
+            ),
+            modifier = LockableModifier.CTRL,
+        ),
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_shift,
+                action = KeyAction.Modifier(HidUsage.KEY_LEFT_SHIFT),
+                style = KeyStyle.MODIFIER,
+                contentDescRes = R.string.fused_mod_shift,
+            ),
+            modifier = LockableModifier.SHIFT,
+        ),
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_fn,
+                action = KeyAction.Fn,
+                style = KeyStyle.FN,
+                contentDescRes = R.string.fused_mod_fn,
+            ),
+            modifier = LockableModifier.FN,
+        ),
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_option,
+                action = KeyAction.Modifier(HidUsage.KEY_LEFT_ALT),
+                style = KeyStyle.MODIFIER,
+                contentDescRes = R.string.fused_mod_option,
+            ),
+            modifier = LockableModifier.ALT,
+        ),
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_cmd,
+                action = KeyAction.Modifier(HidUsage.KEY_LEFT_GUI),
+                style = KeyStyle.MODIFIER,
+                contentDescRes = R.string.fused_mod_cmd,
+            ),
+            modifier = LockableModifier.GUI,
+        ),
+        tabKey(),
+        escKey(),
+    )
 
-    private var held = false
-    private var latched = false
-    private var comboUsed = false
-
-    /** shift 当前是否活跃（按住或粘滞）：用于键帽高亮。 */
-    val active: Boolean
-        get() = held || latched
-
-    /** shift 是否处于粘滞（轻点）态。 */
-    val latchedNow: Boolean
-        get() = latched
-
-    /** shift 按下：调用方应同时发送 `modifierDown(LEFT_SHIFT)`。 */
-    fun onShiftDown() {
-        held = true
-        comboUsed = false
-    }
-
-    /**
-     * shift 抬起：调用方应同时发送 `modifierUp(LEFT_SHIFT)`；返回抬起后的粘滞态。
-     *
-     * 未处于按住态时是防御分支（例如信号丢失导致的孤立抬手）：直接返回当前粘滞态，
-     * 不翻转、不改状态。
-     */
-    fun onShiftUp(): Boolean {
-        if (!held) return latched
-        held = false
-        if (!comboUsed) {
-            // 轻点（按住期间没有组合过其它键）→ 翻转粘滞
-            latched = !latched
-        }
-        comboUsed = false
-        return latched
-    }
-
-    /**
-     * 其它键按下时调用：返回该键实际应发送的字符。
-     *
-     * - shift 按住 → 大写（与 modifierDown 的位图叠加，双保险）；
-     * - shift 粘滞 → 大写并清除粘滞（单次组合用完即清）；
-     * - 都没有 → 原字符。
-     */
-    fun charToSend(char: Char): Char {
-        val upper = active
-        if (held) comboUsed = true
-        if (latched) latched = false
-        return if (upper) char.uppercaseChar() else char
-    }
-
-    /** 五指挥势作废按下 / 页面退出时整体复位。 */
-    fun reset() {
-        held = false
-        latched = false
-        comboUsed = false
-    }
+    DevicePlatform.OTHER -> listOf(
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_ctrl,
+                action = KeyAction.Modifier(HidUsage.KEY_LEFT_CONTROL),
+                style = KeyStyle.MODIFIER,
+                contentDescRes = R.string.fused_mod_ctrl,
+            ),
+            modifier = LockableModifier.CTRL,
+        ),
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_shift,
+                action = KeyAction.Modifier(HidUsage.KEY_LEFT_SHIFT),
+                style = KeyStyle.MODIFIER,
+                contentDescRes = R.string.fused_mod_shift,
+            ),
+            modifier = LockableModifier.SHIFT,
+        ),
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_fn,
+                action = KeyAction.Fn,
+                style = KeyStyle.FN,
+                contentDescRes = R.string.fused_mod_fn,
+            ),
+            modifier = LockableModifier.FN,
+        ),
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_win,
+                action = KeyAction.Modifier(HidUsage.KEY_LEFT_GUI),
+                style = KeyStyle.MODIFIER,
+                contentDescRes = R.string.fused_mod_win,
+            ),
+            modifier = LockableModifier.GUI,
+        ),
+        FusedModifierSpec(
+            spec = KeySpec(
+                labelRes = R.string.fused_mod_alt,
+                action = KeyAction.Modifier(HidUsage.KEY_LEFT_ALT),
+                style = KeyStyle.MODIFIER,
+                contentDescRes = R.string.fused_mod_alt,
+            ),
+            modifier = LockableModifier.ALT,
+        ),
+        tabKey(),
+        escKey(),
+    )
 }
+
+/** tab 键：点击直接发送（不锁定）。 */
+private fun tabKey(): FusedModifierSpec = FusedModifierSpec(
+    spec = KeySpec(
+        labelRes = R.string.fused_mod_tab,
+        action = KeyAction.Usage(HidUsage.KEY_TAB),
+        style = KeyStyle.MODIFIER,
+        contentDescRes = R.string.fused_mod_tab,
+    ),
+    modifier = null,
+)
+
+/** esc 键：点击直接发送（不锁定）。 */
+private fun escKey(): FusedModifierSpec = FusedModifierSpec(
+    spec = KeySpec(
+        labelRes = R.string.fused_mod_esc,
+        action = KeyAction.Usage(HidUsage.KEY_ESCAPE),
+        style = KeyStyle.MODIFIER,
+        contentDescRes = R.string.fused_mod_esc,
+    ),
+    modifier = null,
+)
 
 /** 融合页自建 HID 传输：调用方没有传入 [HidTransport] 时组装系统实现（或空实现）。 */
 @Composable

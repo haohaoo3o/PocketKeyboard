@@ -1,8 +1,6 @@
 package com.pocketkeyboard.app.keyboard
 
-import android.app.Activity
 import android.content.Context
-import android.content.ContextWrapper
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -16,17 +14,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -51,7 +50,6 @@ import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.MainViewModel
 import com.pocketkeyboard.app.ui.theme.PureBlack
 import com.pocketkeyboard.app.ui.theme.PureWhite
-import kotlinx.coroutines.launch
 
 /**
  * 引导键盘报告最多同时按下的普通按键数。
@@ -119,70 +117,30 @@ fun KeyboardScreen(
     // 会被自己的松键立刻清掉（usage = 0 对 Consumer 是显式释放，不是空报告）。
     val functionKeyPath = remember { mutableStateMapOf<KeySpec, Boolean>() }
 
-    // fn + 空格的本机背光档位与 HUD
-    var brightnessLevel by remember { mutableIntStateOf(0) }
+    // fn 组合键 HUD（屏幕中央、iOS 风格）；1 秒后由 KeyboardHudLayer 自动淡出
     var hud by remember { mutableStateOf<KeyboardHudRequest?>(null) }
 
-    // HUD 文案全部来自 strings.xml（组合期解析；按键回调里没有 Composable 上下文）
-    val brightnessLabels = listOf(
-        stringResource(R.string.hud_brightness_100),
-        stringResource(R.string.hud_brightness_75),
-        stringResource(R.string.hud_brightness_50),
-        stringResource(R.string.hud_brightness_25),
-        stringResource(R.string.hud_brightness_min),
-    )
-    val keyColorLabels = listOf(
-        stringResource(R.string.hud_key_color_white),
-        stringResource(R.string.hud_key_color_orange),
-        stringResource(R.string.hud_key_color_red),
-    )
-    val textSizeLabels = listOf(
-        stringResource(R.string.hud_text_size_small),
-        stringResource(R.string.hud_text_size_medium),
-        stringResource(R.string.hud_text_size_large),
-    )
-    val hapticLabels = listOf(
-        stringResource(R.string.hud_haptic_off),
-        stringResource(R.string.hud_haptic_weak),
-        stringResource(R.string.hud_haptic_medium),
-        stringResource(R.string.hud_haptic_strong),
-    )
-    val title = stringResource(R.string.keyboard_title)
-    val fnHint = stringResource(R.string.keyboard_fn_hint)
+    // fn 组合（空格 / C / S / V）的本机功能：与竖屏融合页的系统输入法转发路径
+    // 共用同一实现（见 [FnComboActions]），两个页面的 fn 行为保持一致
+    // （scope 复用函数开头的 rememberCoroutineScope）
+    val fnComboLabels = rememberFnComboLabels()
+    val fnCombos = remember(context, preferencesStore, scope, fnComboLabels) {
+        FnComboActions(
+            context = context,
+            store = preferencesStore,
+            scope = scope,
+            labels = fnComboLabels,
+            currentPreferences = { preferences },
+            onHud = { request -> hud = request },
+        )
+    }
 
     val vibrator = rememberVibrator()
     val keyCapColor = preferences.keyCapColor.toKeyCapTextColor()
 
-    // ---------------------------------------------------------------- fn 组合（本机功能，不发给被控设备）
-
-    fun cycleBrightness() {
-        brightnessLevel = (brightnessLevel + 1) % BRIGHTNESS_LEVELS.size
-        applyWindowBrightness(context, BRIGHTNESS_LEVELS[brightnessLevel])
-        hud = KeyboardHudRequest.Brightness(
-            BrightnessHudRequest(level = brightnessLevel, label = brightnessLabels[brightnessLevel]),
-        )
-    }
-
-    fun cycleKeyCapColor() {
-        val values = KeyCapColor.entries
-        val next = values[(preferences.keyCapColor.ordinal + 1) % values.size]
-        scope.launch { preferencesStore.setKeyCapColor(next) }
-        hud = KeyboardHudRequest.Message(MessageHudRequest(keyColorLabels[next.ordinal]))
-    }
-
-    fun cycleTextSize() {
-        val values = KeyTextSize.entries
-        val next = values[(preferences.keyTextSize.ordinal + 1) % values.size]
-        scope.launch { preferencesStore.setKeyTextSize(next) }
-        hud = KeyboardHudRequest.Message(MessageHudRequest(textSizeLabels[next.ordinal]))
-    }
-
-    fun cycleHapticStrength() {
-        val values = HapticStrength.entries
-        val next = values[(preferences.hapticStrength.ordinal + 1) % values.size]
-        scope.launch { preferencesStore.setHapticStrength(next) }
-        hud = KeyboardHudRequest.Message(MessageHudRequest(hapticLabels[next.ordinal]))
-    }
+    // 顶部标题与 fn 组合提示（strings.xml；按键回调里没有 Composable 上下文，故在此解析）
+    val title = stringResource(R.string.keyboard_title)
+    val fnHint = stringResource(R.string.keyboard_fn_hint)
 
     // ---------------------------------------------------------------- 按键 → HID 报告
 
@@ -199,37 +157,11 @@ fun KeyboardScreen(
             fnComboUsed = true
             // 粘滞的 fn 只生效一次组合：命中组合键即刻清除，否则「轻点 fn（粘滞亮起）
             // → 按 C 换颜色 → 再按 C」会重复触发本机功能，与「单次组合」的约定矛盾。
-            // 四个 fn 本机功能分支都会提前 return，所以清除必须放在它们之前。
+            // fn 组合分支会提前 return，所以清除必须放在它们之前。
             fnLatched = false
-            val action = spec.action
-            // fn + 空格 / C / S / V：本机功能，不发送给被控设备
-            if (action is KeyAction.Usage && action.usage == HidUsage.KEY_SPACE) {
+            if (fnCombos.run(spec.action)) {
                 performKeyHaptic(view, vibrator)
-                cycleBrightness()
                 return
-            }
-            if (action is KeyAction.Character) {
-                when (action.char.lowercaseChar()) {
-                    'c' -> {
-                        performKeyHaptic(view, vibrator)
-                        cycleKeyCapColor()
-                        return
-                    }
-
-                    's' -> {
-                        performKeyHaptic(view, vibrator)
-                        cycleTextSize()
-                        return
-                    }
-
-                    'v' -> {
-                        performKeyHaptic(view, vibrator)
-                        cycleHapticStrength()
-                        return
-                    }
-
-                    else -> Unit
-                }
             }
             // fn + 其他键：粘滞状态在上面已清除，这里继续正常发送报告
         }
@@ -313,7 +245,11 @@ fun KeyboardScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(PureBlack),
+            .background(PureBlack)
+            // 页面根部预留状态栏 / 刘海空间（需求 1）：横屏全屏 87 键也不能被
+            // 状态栏或凹口遮住第一行；edge-to-edge 保留（背景仍延伸至屏幕边缘）
+            .statusBarsPadding()
+            .displayCutoutPadding(),
     ) {
         Column(
             modifier = Modifier
@@ -338,6 +274,8 @@ fun KeyboardScreen(
                                 fnActive = fnActive,
                                 textColor = keyCapColor,
                                 textSize = preferences.keyTextSize,
+                                // 87 键开启键帽间的渐变分隔细线（需求 5）
+                                showSeams = true,
                                 onPress = { onKeyDown(item.spec) },
                                 onRelease = { onKeyUp(item.spec) },
                                 onAbandoned = { onKeyAbandoned(item.spec) },
@@ -357,6 +295,7 @@ fun KeyboardScreen(
                                         fnActive = fnActive,
                                         textColor = keyCapColor,
                                         textSize = preferences.keyTextSize,
+                                        showSeams = true,
                                         onPress = { onKeyDown(spec) },
                                         onRelease = { onKeyUp(spec) },
                                         onAbandoned = { onKeyAbandoned(spec) },
@@ -482,25 +421,6 @@ private fun vibrateOnce(vibrator: Vibrator?, durationMs: Long, amplitude: Int) {
     vibrator.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
 }
 
-/** 把本机窗口亮度设为 [level]（0..1；只影响当前 Activity 窗口，无需 WRITE_SETTINGS）。 */
-private fun applyWindowBrightness(context: Context, level: Float) {
-    val activity = context.findActivity() ?: return
-    val window = activity.window ?: return
-    val attributes = window.attributes
-    attributes.screenBrightness = level
-    window.attributes = attributes
-}
-
-/** 沿 ContextWrapper 链找到宿主 Activity（拿不到返回 null）。 */
-private fun Context.findActivity(): Activity? {
-    var current: Context? = this
-    while (current is ContextWrapper) {
-        if (current is Activity) return current
-        current = current.baseContext
-    }
-    return null
-}
-
 /**
  * 键盘报告引擎：把「按下 / 松开」翻译成标准 8 字节引导键盘报告。
  *
@@ -540,6 +460,25 @@ internal class KeyboardReportEngine(
     fun keyUp(usage: Int) {
         heldUsages.remove(usage)
         flush()
+    }
+
+    /**
+     * 一次性按下并松开某个 usage（竖屏融合页的「系统输入法 → HID」转发路径）。
+     *
+     * 与 [keyDown] / [keyUp] 的区别：不进入 [heldUsages]（转发路径没有「按住」概念），
+     * 发一份「按下」报告 + 一份「松开」报告即成完整按键。
+     *
+     * @param extraModifiers 外部叠加的修饰键位图：融合页底部锁定的修饰键
+     *       （如锁定 ctrl 后打 c = Ctrl+C）。锁定的修饰键在松键报告里**继续保留**，
+     *       因为它们仍处于锁定态，直到用户再次点击解锁；
+     * @param momentaryShift 该字符本身需要 Shift（如 `!` `A`）：只在按下报告里叠加，
+     *      松键报告即撤下，不影响锁定态。
+     */
+    fun keyTap(usage: Int, extraModifiers: Int = HidModifier.NONE, momentaryShift: Boolean = false) {
+        val held = modifierBits or extraModifiers
+        val pressed = if (momentaryShift) held or HidModifier.LEFT_SHIFT else held
+        transport.sendKeyboardReport(pressed, byteArrayOf(usage.toByte()))
+        transport.sendKeyboardReport(held, ByteArray(0))
     }
 
     /** Consumer Page (0x0C) 媒体键；usage = 0 表示松开。 */

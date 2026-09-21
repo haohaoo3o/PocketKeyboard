@@ -46,6 +46,17 @@ class MainViewModel : ViewModel() {
     /** 当前页面模式：PAIRING / KEYBOARD / TRACKPAD / NUMPAD。 */
     val mode: StateFlow<AppMode> = _mode.asStateFlow()
 
+    private val _connectedDeviceAddresses = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * 当前已连接 HID 对端的地址集合（Bug 2b 新增字段，不动既有契约字段）。
+     *
+     * 数据来自 HID 后端的 registry 快照（`MainViewModelStatusBridge.onConnectedDevicesChanged`），
+     * 配对页据此在设备行上显示「已连接」标识——「已配对」不等于「已连接」，
+     * 用户需要能看出哪个设备真的在收发键鼠报告。
+     */
+    val connectedDeviceAddresses: StateFlow<Set<String>> = _connectedDeviceAddresses.asStateFlow()
+
     // ---- 以下 setter 供配对 / 传输逻辑与页面调用 ----
 
     fun setPinCode(pinCode: String?) {
@@ -62,5 +73,10 @@ class MainViewModel : ViewModel() {
 
     fun setMode(mode: AppMode) {
         _mode.value = mode
+    }
+
+    /** 更新「已连接 HID 对端」地址集合（HID bridge 推送 registry 快照）。 */
+    fun setConnectedDeviceAddresses(addresses: Set<String>) {
+        _connectedDeviceAddresses.value = addresses
     }
 }

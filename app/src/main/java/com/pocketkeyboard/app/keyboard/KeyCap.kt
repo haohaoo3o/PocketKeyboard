@@ -34,7 +34,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketkeyboard.app.gesture.PocketKeyGestureHandler
@@ -58,13 +61,26 @@ private const val PRESSED_SCALE = 0.94f
 private const val ICON_VIEWPORT = 24f
 
 /**
- * 单个键帽：黑底白字、与相邻键帽**无缝**（gap = 0），仅靠按压下陷区分边界。
+ * 键帽文字样式：关闭系统字体 padding（`includeFontPadding = false`）。
  *
- * ## 无缝 + 下陷
- * - 静止态：纯黑 `#000000` 底 + 白色（或偏好色）文字，没有任何描边 / 间距；
+ * 安卓默认的字体 padding 会让单行文字的视觉重心偏离格子中心（需求 5：字母必须在
+ * 格子内水平 + 垂直居中）。关掉后 Text 的测量高度等于字形实际高度，配合外层
+ * `Box(contentAlignment = Center)` 才是真正的居中。
+ */
+private val KeyCapTextStyle = TextStyle(
+    platformStyle = PlatformTextStyle(includeFontPadding = false),
+)
+
+/**
+ * 单个键帽：黑底白字、与相邻键帽**几乎无缝**（gap = 0），仅靠按压下陷与
+ * 1dp 渐变分隔细线区分边界（需求 5）。
+ *
+ * ## 无缝 + 细分隔线 + 下陷
+ * - 静止态：纯黑 `#000000` 底 + 白色（或偏好色）文字；相邻键帽之间画一条 1dp、
+ *   白色 10% 透明度、从一端淡出的渐变细线（见 [KeySeamLines]），远看无缝、近看可辨；
  * - 按下态：整体缩放到 [PRESSED_SCALE]，底色变 [PressedKeyBackground]，
  *   顶部叠加白色渐变高光、底部一条细亮线（`Modifier.sunkenEdges`），
- *   视觉上像键帽沉入键槽；松手后 spring 回弹；
+ *   视觉上像键帽沉入键槽；松手后 spring 回弹（分隔线不随缩放移动）；
  * - 触觉：按下时按 [HapticScale] 档位反馈（中档走系统
  *   `HapticFeedbackConstants.KEYBOARD_TAP`，弱 / 强档走 Vibrator 振幅）。
  *
@@ -76,6 +92,10 @@ private const val ICON_VIEWPORT = 24f
  * @param spec 键位描述（见 [KeySpec]）
  * @param fnActive fn 是否活跃（按住或粘滞）：F 行改显示 F1–F12 大字号本义标签，
  *                 fn / Globe 键整颗高亮
+ * @param highlighted 该键是否处于「激活 / 锁定」态（融合页修饰键排的锁定修饰键）：
+ *                     整颗键帽按下陷底色 + 高亮边，与 fn 高亮视觉一致
+ * @param showSeams 是否绘制键帽之间的渐变分隔细线（87 键键盘与融合页修饰键排开启；
+ *                  小键盘 sheet 等紧凑布局可关闭）
  * @param textColor 键帽文字颜色（fn + C 循环：白 / 橙 / 红）
  * @param textSize 键帽字号档位（fn + S 循环：小 / 中 / 大）
  * @param onPress 单指按下（已发送 HID 报告 / 已触发本机功能）
@@ -88,6 +108,8 @@ fun KeyCap(
     spec: KeySpec,
     fnActive: Boolean,
     modifier: Modifier = Modifier,
+    highlighted: Boolean = false,
+    showSeams: Boolean = false,
     textColor: Color = PureWhite,
     textSize: KeyTextSize = KeyTextSize.MEDIUM,
     onPress: () -> Unit = {},
@@ -107,9 +129,9 @@ fun KeyCap(
         label = "keyCapScale",
     )
 
-    // fn 活跃时 fn / Globe 键常亮高亮（粘滞视觉状态）
+    // fn 活跃时 fn / Globe 键常亮高亮（粘滞视觉状态）；融合页修饰键排的锁定态走 highlighted
     val fnHighlight = fnActive && spec.style == KeyStyle.FN
-    val sunken = pressedNow || fnHighlight
+    val sunken = pressedNow || fnHighlight || highlighted
 
     // F 行：fn 活跃时改显示 F1–F12 本义大字号标签，否则显示媒体图标
     val showNativeLabel = fnActive && spec.action is KeyAction.FunctionKey
@@ -127,6 +149,19 @@ fun KeyCap(
     Box(
         modifier = modifier
             .fillMaxHeight()
+            // 键帽之间的渐变分隔细线（需求 5）。必须挂在 graphicsLayer **之前**：
+            // 该节点是 graphicsLayer 的父节点，画的是格子原始坐标——按下时键帽内容
+            // 缩放到 0.94，分隔线留在原位，网格不随下陷动画晃动
+            .then(
+                if (showSeams) {
+                    Modifier.drawWithContent {
+                        drawContent()
+                        drawKeySeamLines()
+                    }
+                } else {
+                    Modifier
+                },
+            )
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -168,6 +203,8 @@ fun KeyCap(
                 fontSize = labelSize,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
+                textAlign = TextAlign.Center,
+                style = KeyCapTextStyle,
             )
 
             spec.icon != null -> Column(
@@ -187,6 +224,8 @@ fun KeyCap(
                         color = textColor.copy(alpha = 0.5f),
                         fontSize = subLabelSize,
                         maxLines = 1,
+                        textAlign = TextAlign.Center,
+                        style = KeyCapTextStyle,
                     )
                 }
             }
@@ -202,6 +241,8 @@ fun KeyCap(
                         color = textColor.copy(alpha = 0.5f),
                         fontSize = subLabelSize,
                         maxLines = 1,
+                        textAlign = TextAlign.Center,
+                        style = KeyCapTextStyle,
                     )
                 }
                 Text(
@@ -210,10 +251,33 @@ fun KeyCap(
                     fontSize = labelSize,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    style = KeyCapTextStyle,
                 )
             }
         }
     }
+}
+
+/**
+ * 键帽格子的两条渐变分隔细线（需求 5）：右缘垂直线（左右键之分隔，自上而下淡出）
+ * + 下缘水平线（上下行之分隔，自左向右淡出）。
+ *
+ * 线宽 1dp、白色 10% 透明度，向格子内缩半个线宽——屏幕最右 / 最下边缘的键帽
+ * 画出来也不会被裁掉半根而显得突兀。
+ */
+private fun DrawScope.drawKeySeamLines() {
+    val lineWidth = SEAM_LINE_WIDTH.toPx()
+    drawVerticalSeamLine(
+        x = size.width - lineWidth,
+        width = lineWidth,
+        height = size.height,
+    )
+    drawHorizontalSeamLine(
+        y = size.height - lineWidth,
+        width = size.width,
+        height = lineWidth,
+    )
 }
 
 /**

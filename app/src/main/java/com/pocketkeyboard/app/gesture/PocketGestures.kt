@@ -6,9 +6,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
@@ -79,8 +81,10 @@ class PocketGestureHandler(
  *
  * - **键盘按键层**：见 [pocketKeyGestures]，按键的 pointerInput 只响应单指，
  *   检测到按下指针数 ≥ [GestureConstants.REQUIRED_FINGER_COUNT] 时不消费、直接放行。
- * - **触控板层**：见 [GestureArbiter] 与 [awaitGestureOwner]，按下后
- *   [GestureConstants.ARBITRATION_WINDOW_MS] 内凑满 5 指归本层，否则归触控板的 1–4 指手势。
+ * - **触控板层**：见 [GestureArbiter] 与 [awaitGestureOwner]。本层在滑动凑指窗口内凑满
+ *   5 指就 `claimFiveFinger()` 接管；明确不是五指挥势时（窗口到期 / 手指明显在动 /
+ *   全部抬起）立刻 `releaseToTrackpad()`，触控板层的 1–4 指手势随即开始，
+ *   单指操作几乎无延迟。
  *
  * @param handler 手势业务回调
  * @param arbiter 与触控板层共享的仲裁器；同一个实例必须同时传给 `Modifier.pocketGestures`
@@ -114,7 +118,7 @@ fun Modifier.pocketGestures(
  *
  * ```
  * 等第一根手指落下
- *   └─ 仲裁窗口内凑满 5 指？
+ *   └─ 凑指窗口（滑动）内凑满 5 指？
  *        ├─ 否 → 仲裁器交给触控板层；等所有手指抬起；reset；进入下一轮
  *        └─ 是 → 仲裁器声明五指层接管
  *                └─ 记录初始几何（质心 + 指尖平均间距）
@@ -122,27 +126,42 @@ fun Modifier.pocketGestures(
  *                   └─ 有手指抬起 → 手势结束
  *                └─ 等所有手指抬起；reset；进入下一轮
  * ```
+ *
+ * ## 凑指窗口为什么是「滑动的」
+ *
+ * 人手放下 5 根手指必然有先后：熟练的人 100ms 内放下，认真摆位的要 300ms 以上。窗口写成
+ * 固定的 60ms 时，**人类几乎不可能凑齐**，五指挥势层永远等不到第 5 根手指、每次都直接放手，
+ * 于是 pinch / spread / swipe 永远不触发（实测 bug）。因此改成：
+ *
+ * - 每有新手指落下 → 截止时间续期到「该手指落下 + [GestureConstants.FINGER_GATHER_RENEW_MS]」；
+ * - 总截止不晚于「第一根手指落下 + [GestureConstants.FINGER_GATHER_MAX_MS]」；
+ * - 已按下的手指位移超过 [GestureConstants.FINGER_GATHER_MOVE_SLOP] 且没有新手指继续落下
+ *   → **立刻**放手（这是触控板手势正在进行，不是摆指）；
+ * - 所有手指都抬起 → **立刻**放手（手势在窗口内就结束了）。
+ *
+ * 于是五指手势有充足的凑指时间，而单指 / 双指触控板操作几乎感觉不到等待：
+ * 「按下即拖动」的手指一动过阈值，五指层在同一批事件里就放手了。
  */
 private suspend fun PointerInputScope.detectPocketGestures(
     handler: () -> PocketGestureHandler,
     arbiter: GestureArbiter,
 ) {
     val swipeThresholdPx = GestureConstants.SWIPE_DISTANCE.toPx()
+    val gatherSlopPx = GestureConstants.FINGER_GATHER_MOVE_SLOP.toPx()
     awaitEachGesture {
         // 读 Initial pass：父节点先于子节点看到事件，抢在按键 / 触控板之前表态
         val firstDown = awaitFirstDownOnPass()
-        val gatherDeadline = firstDown.uptimeMillis + GestureConstants.FINGER_GATHER_WINDOW_MS
 
-        val gathered = awaitFiveFingersGathered(firstDown.uptimeMillis, gatherDeadline)
+        val gathered = awaitFiveFingersGathered(firstDown, gatherSlopPx)
         if (gathered == null) {
-            // 仲裁窗口内没凑满 5 指：本次触摸归触控板层，本层不消费、不动作
+            // 明确不是五指挥势：立刻释放，触控板层的 awaitGestureOwner 随即返回 TRACKPAD
             arbiter.releaseToTrackpad()
             awaitAllPointersUp()
             arbiter.reset()
             return@awaitEachGesture
         }
 
-        // 抢到归属：触控板层的 awaitDecision() 会立刻返回 FIVE_FINGER 并放弃本次手势
+        // 抢到归属：触控板层的 awaitGestureOwner 会立刻返回 FIVE_FINGER 并放弃本次手势
         arbiter.claimFiveFinger()
 
         val initialPoints = gathered.changes.filter { it.pressed }.toFingerPoints()
@@ -210,29 +229,82 @@ private suspend fun AwaitPointerEventScope.trackAndFireFiveFingerGesture(
 }
 
 /**
- * 在仲裁窗口内等待凑满 [GestureConstants.REQUIRED_FINGER_COUNT] 指。
+ * 第一根手指落下时的信息：down 本身 + 它所在的那个 [PointerEvent]。
  *
- * @return 凑满那一刻的 [PointerEvent]；窗口耗尽仍未凑齐则返回 null。
- *   超时用的是**绝对截止时间**（首指按下时间 + 窗口时长），因此中间即使有大量移动事件
- *   也不会把窗口无限续期。
+ * 为什么连事件一起返回：一次 `dispatchTouchEvent` 可能把多根手指的 down 打包进同一个
+ * [PointerEvent]（合成注入、系统批量上报都会这样）。只拿 change 不拿事件的话，凑指循环会
+ * 去读**下一个**事件，万一中间没有任何移动事件就直接错过「5 指同帧落下」这种最快的情况。
+ */
+private class FirstDownOnPass(
+    val change: PointerInputChange,
+    val event: PointerEvent,
+)
+
+/**
+ * 在滑动凑指窗口内等待凑满 [GestureConstants.REQUIRED_FINGER_COUNT] 指。
+ *
+ * 窗口规则（详见 [detectPocketGestures] 的说明）：
+ * - 每有新手指落下 → 截止时间续期到「该手指落下 + [GestureConstants.FINGER_GATHER_RENEW_MS]」；
+ * - 总截止不晚于「第一根手指落下 + [GestureConstants.FINGER_GATHER_MAX_MS]」；
+ * - 没有新手指、而已按下手指的位移超过 [gatherSlopPx] → 立刻返回 null（触控板手势正在进行）；
+ * - 所有手指都抬起 → 立刻返回 null（手势在窗口内就结束了，也必须让触控板层收到裁决）。
+ *
+ * 位移基准（[PointerId] → 落点）每来一根新手指就整体重设一次：慢慢把 5 根手指摆开时，
+ * 先落下的那几根有轻微漂移是正常的摆位，不算「拖动」，不会误触发放手。
+ *
+ * @return 凑满那一刻的 [PointerEvent]；明确凑不齐则返回 null。
  */
 private suspend fun AwaitPointerEventScope.awaitFiveFingersGathered(
-    firstDownUptime: Long,
-    deadline: Long,
+    firstDown: FirstDownOnPass,
+    gatherSlopPx: Float,
 ): PointerEvent? {
-    var latestUptime = firstDownUptime
+    val firstDownUptime = firstDown.change.uptimeMillis
+    val hardDeadline = firstDownUptime + GestureConstants.FINGER_GATHER_MAX_MS
+    // 基准位置：每来一根新手指就重设（见函数注释）
+    var baseline: Map<PointerId, Offset> =
+        firstDown.event.changes.filter { it.pressed }.associate { it.id to it.position }
+    var lastNewFingerUptime = firstDownUptime
+    var event = firstDown.event
+
     while (true) {
+        val pressed = event.changes.filter { it.pressed }
+        if (pressed.isEmpty()) {
+            // 手势在窗口内就结束了：立刻放手，否则触控板层等不到裁决、这次轻点会丢
+            return null
+        }
+        if (pressed.size >= GestureConstants.REQUIRED_FINGER_COUNT) return event
+
+        val latestUptime = pressed.maxOfOrNull { it.uptimeMillis } ?: lastNewFingerUptime
+        val newFingerArrived = pressed.any { !baseline.containsKey(it.id) }
+        if (newFingerArrived) {
+            // 有新手指落下：续期 + 重设位移基准
+            baseline = pressed.associate { it.id to it.position }
+            lastNewFingerUptime = latestUptime
+        } else if (pressed.any { change ->
+                val from = baseline[change.id] ?: return@any false
+                fingerTravel(change.position, from) > gatherSlopPx
+            }
+        ) {
+            // 没有新手指、而已按下的手指明显在动 → 这是正在进行的触控板手势
+            return null
+        }
+
+        val deadline = minOf(
+            lastNewFingerUptime + GestureConstants.FINGER_GATHER_RENEW_MS,
+            hardDeadline,
+        )
         val remaining = deadline - latestUptime
         if (remaining <= 0L) return null
-        val event = withTimeoutOrNull(remaining) {
+        val next = withTimeoutOrNull(remaining) {
             awaitPointerEvent(PointerEventPass.Initial)
         } ?: return null
-        latestUptime = event.changes.maxOfOrNull { it.uptimeMillis } ?: latestUptime
-        if (event.changes.count { it.pressed } >= GestureConstants.REQUIRED_FINGER_COUNT) {
-            return event
-        }
+        event = next
     }
 }
+
+/** 一根手指从基准位置 [from] 走到 [to] 的直线距离（px）。 */
+private fun fingerTravel(to: Offset, from: Offset): Float =
+    kotlin.math.hypot((to.x - from.x).toDouble(), (to.y - from.y).toDouble()).toFloat()
 
 /** 等待所有手指抬起（`awaitEachGesture` 尾部也会做，这里显式写出来以便复位仲裁器）。 */
 private suspend fun AwaitPointerEventScope.awaitAllPointersUp() {
@@ -247,14 +319,19 @@ private suspend fun AwaitPointerEventScope.awaitAllPointersUp() {
  *
  * 不使用框架的 `awaitFirstDown`，因为它只提供 Main pass；本层要读 Initial pass，
  * 才能保证「父节点先于子节点看到第 5 根手指并抢到仲裁」。
+ *
+ * @return 落下的那根手指 + 它所在的事件（事件里可能还打包了同一帧落下的其它手指，
+ *     见 [FirstDownOnPass] 的说明）。
  */
 private suspend fun AwaitPointerEventScope.awaitFirstDownOnPass(
     pass: PointerEventPass = PointerEventPass.Initial,
-): PointerInputChange {
+): FirstDownOnPass {
     while (true) {
         val event = awaitPointerEvent(pass)
         event.changes.forEach { change ->
-            if (change.pressed && !change.previousPressed) return change
+            if (change.pressed && !change.previousPressed) {
+                return FirstDownOnPass(change, event)
+            }
         }
     }
 }

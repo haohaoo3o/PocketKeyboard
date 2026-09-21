@@ -27,8 +27,8 @@ import org.robolectric.Shadows.shadowOf
  *
  * 覆盖：冷启动不崩溃、三个页面可渲染可导航、小键盘开合、
  * dock 自动隐藏 / 单指边缘内滑唤出 / 切模式后再次自动隐藏、
- * 竖屏融合布局与横屏全屏 87 键两条布局分支，
- * 以及「未授予蓝牙权限不启动 HID / 授予后补启动」两条路径均不崩溃。
+ * 竖屏融合布局（触控板 + 系统输入法唤起区 + 可锁定修饰键排）与横屏全屏 87 键
+ * 两条布局分支，以及「未授予蓝牙权限不启动 HID / 授予后补启动」两条路径均不崩溃。
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34])
@@ -44,11 +44,21 @@ class AppSmokeTest {
         // 配对页：CONTROL 按钮存在（未连接任何设备时为禁用态，但仍可渲染）
         composeRule.onNodeWithText("CONTROL").assertExists()
 
-        // 导航到键盘页：竖屏为融合布局（上半触控板 + 下半 26 键 QWERTY）
+        // 导航到键盘页：竖屏为融合布局（上半触控板 + 中部系统输入法唤起区 + 底部修饰键排）
         composeRule.onNodeWithText("键盘").performClick()
         composeRule.waitForIdle()
-        // 26 键键盘真实组合出来（字母标签一律大写显示）
-        composeRule.onAllNodesWithText("Q").onFirst().assertExists()
+        // 系统输入法唤起区的提示与无障碍描述真实组合出来
+        composeRule.onNodeWithText("点此唤起系统键盘").assertExists()
+        composeRule.onNodeWithContentDescription("文本输入区，点此弹出系统键盘，输入内容会发送到被控设备")
+            .assertExists()
+        // 修饰键排：ctrl / shift / fn / win / alt / tab / esc 七颗键（Windows 平台标签）
+        composeRule.onNodeWithContentDescription("ctrl").assertExists()
+        composeRule.onNodeWithContentDescription("shift").assertExists()
+        composeRule.onNodeWithContentDescription("fn").assertExists()
+        composeRule.onNodeWithContentDescription("win").assertExists()
+        composeRule.onNodeWithContentDescription("alt").assertExists()
+        composeRule.onNodeWithContentDescription("tab").assertExists()
+        composeRule.onNodeWithContentDescription("esc").assertExists()
         // 触控板区右上角「123」小键盘开关与设备名条
         composeRule.onNodeWithContentDescription("打开或收起数字小键盘").assertExists()
         composeRule.onNodeWithText("未选择控制设备").assertExists()

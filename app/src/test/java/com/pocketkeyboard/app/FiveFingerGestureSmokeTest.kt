@@ -109,8 +109,8 @@ class FiveFingerGestureSmokeTest {
      * 五指收缩：5 指横向拉开后向中间收拢（间距缩到初始 30% 以下 → onPinch）。
      *
      * 全部 down 在同一个 `performTouchInput` 块里连续注入，凑满 5 指的时间落在
-     * [com.pocketkeyboard.app.gesture.GestureConstants.ARBITRATION_WINDOW_MS]
-     * 仲裁窗口内，手势归五指挥势层而不是触控板层。
+     * [com.pocketkeyboard.app.gesture.GestureConstants.FINGER_GATHER_MAX_MS]
+     * 凑指窗口内，手势归五指挥势层而不是触控板层。
      */
     private fun fiveFingerPinch() = with(composeRule) {
         onRoot().performTouchInput {

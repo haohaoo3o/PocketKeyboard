@@ -7,6 +7,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerInputScope
@@ -148,15 +149,22 @@ internal fun clickZones(widthPx: Float, heightPx: Float, density: Density): Clic
  * 1. **按下后先挂起，不动手**：拿到第一根手指的 down 之后，立刻调用
  *    [awaitGestureOwner]（内部转调 `GestureArbiter.awaitDecision()` 语义）挂起等待，
  *    在仲裁结果出来之前**不消费任何 change、不产出任何手势**；
- * 2. **五指层先表态 → 放行**：如果 60ms（[com.pocketkeyboard.app.gesture.GestureConstants.ARBITRATION_WINDOW_MS]）
- *    内凑满 5 指，五指挥势层会在 Initial pass 里调用 `claimFiveFinger()`，
- *    [awaitGestureOwner] 立刻返回 [GestureOwner.FIVE_FINGER]，本层直接结束本轮
- *    `awaitEachGesture`、什么都不做，事件自然继续留给五指层；
- * 3. **窗口耗尽 → 接管**：60ms 内没有凑满 5 指，[awaitGestureOwner] 返回
- *    [GestureOwner.TRACKPAD]，本层才开始处理 1–4 指手势；
+ * 2. **五指层先表态 → 放行**：凑指窗口内凑满 5 指时，五指挥势层会在 Initial pass 里调用
+ *    `claimFiveFinger()`，[awaitGestureOwner] 立刻返回 [GestureOwner.FIVE_FINGER]，
+ *    本层直接结束本轮 `awaitEachGesture`、什么都不做，事件自然继续留给五指层；
+ * 3. **五指层放手 → 接管**：五指挥势层判定「明确不是五指挥势」（凑指窗口到期 /
+ *    手指明显在动 / 全部抬起）时调用 `releaseToTrackpad()`，[awaitGestureOwner] 随即返回
+ *    [GestureOwner.TRACKPAD]，本层开始处理 1–4 指手势。**没有固定等待时长**：
+ *    裁决是事件驱动的，单指触控板操作因此几乎无延迟；
  * 4. **谁复位**：五指挥势层在「所有手指抬起」后调用 `arbiter.reset()`，
  *    本层不负责复位；但每轮手势开始时会调一次 `arbiter.onGestureStart()` 兜底，
  *    防止上一轮遗留的归属被带到新一轮（详见 [detectTrackpadGestures] 里的注释）。
+ *
+ * ## 触觉反馈
+ *
+ * 反馈动作由 [rememberTrackpadHapticFeedback] 提供、策略与「一次手势只反馈一次」的
+ * 状态在 [TrackpadGestureHaptics]，本修饰符在每轮手势里驱动它，因此触控板页与
+ * 竖屏融合页（`FusedControlScreen`）自动共用同一套反馈与同一档位。
  *
  * @param platform 当前控制目标平台，决定三指 / 四指手势映射
  * @param handler 手势回调
@@ -178,6 +186,9 @@ fun Modifier.trackpadGestures(
     // rememberUpdatedState：pointerInput 的 key 只有 arbiter / platform / 阈值，
     // handler 每次重组都变，用UpdatedState 保证回调拿到最新实例而不重启手势协程
     val currentHandler by rememberUpdatedState(handler)
+    // 触觉反馈动作（稳定 lambda）：与键盘页 / 底部点击区共用 HapticScale 档位（fn+V 循环切换）。
+    // 反馈的「一次手势只发一次」状态在 detectTrackpadGestures 里每轮新手势重建
+    val hapticFeedback = rememberTrackpadHapticFeedback()
     return this.then(
         if (enabled) {
             Modifier.pointerInput(arbiter, platform, thresholds, clickZonesEnabled) {
@@ -189,6 +200,7 @@ fun Modifier.trackpadGestures(
                     thresholds = thresholds,
                     clickZonesEnabled = clickZonesEnabled,
                     density = density,
+                    hapticFeedback = hapticFeedback,
                 )
             }
         } else {
@@ -203,9 +215,9 @@ fun Modifier.trackpadGestures(
  * ```
  * awaitEachGesture {                                  // 每轮都从「所有手指抬起」的干净状态开始
  *   awaitTrackpadDown(zones)                          // ① 等第一根手指落下（含点击区里的按下）
- *   awaitGestureOwner(arbiter, down.uptimeMillis)     // ② 仲裁：60ms 内凑满 5 指归五指层
+ *   awaitGestureOwner(arbiter, down.uptimeMillis)     // ② 仲裁：等五指层的最终裁决
  *        ├─ FIVE_FINGER → return，不消费 → 五指层接管
- *        └─ TRACKPAD   → ③ 逐事件喂给 TrackpadGestureTracker
+ *        └─ TRACKPAD   → observedEvents 按顺序补喂 + ③ 逐事件喂给 TrackpadGestureTracker
  *   tracker.finish()                                  // ④ 所有手指抬起：点击判定
  * }
  * ```
@@ -217,8 +229,12 @@ private suspend fun PointerInputScope.detectTrackpadGestures(
     thresholds: TrackpadThresholds,
     clickZonesEnabled: Boolean,
     density: Density,
+    hapticFeedback: () -> Unit,
 ) {
     awaitEachGesture {
+        // 触觉反馈：一次手势一个实例，「滚动只反馈第一拍」的配额每轮新手势重置
+        val haptics = TrackpadGestureHaptics(hapticFeedback)
+
         // 点击区矩形只跟触控区尺寸有关，手势开始前算一次就够（尺寸变化会由重组触发新 pointerInput）
         val zones = if (clickZonesEnabled) {
             clickZones(size.width.toFloat(), size.height.toFloat(), density)
@@ -226,7 +242,7 @@ private suspend fun PointerInputScope.detectTrackpadGestures(
             null
         }
 
-        // ① 等第一根手指落下
+        // ① 等第一根手指落下（返回它所在的事件：同一帧里可能还有别的指针已经按下）
         val firstDown = awaitTrackpadDown(zones)
 
         // 兜底复位：把上一轮可能遗留的归属清成「未裁定」，避免新一轮手势被旧结果直接带走。
@@ -235,63 +251,104 @@ private suspend fun PointerInputScope.detectTrackpadGestures(
         // （本轮裁定至少要等第 5 根手指落下，而那一定晚于这里看到的第 1 根手指）。
         arbiter.onGestureStart()
 
-        // ② 仲裁：在五指层表态之前不消费、不动作
-        if (awaitGestureOwner(arbiter, firstDown.uptimeMillis) == GestureOwner.FIVE_FINGER) {
+        // ② 仲裁：在五指层表态之前不消费、不动作。
+        // 事件驱动：五指层一放手这里就返回，不再有固定 60ms 超时；等待期间读到的事件
+        // 全部缓存下来，接管后按原顺序补喂给跟踪器（否则「窗口内就结束」的轻点会丢）。
+        val arbitration = awaitGestureOwner(arbiter, firstDown.change.uptimeMillis)
+        if (arbitration.owner == GestureOwner.FIVE_FINGER) {
             // 归五指层：什么都不做，事件继续留给父节点的五指挥势层
             return@awaitEachGesture
         }
 
         // ③ 归触控板层：开始跟踪 1–4 指手势
         // 记录每根手指「按下时」的位置：判断它是不是按在底部点击区必须用按下位置，
-        // 否则手指一滑出点击区，按住状态就丢了
+        // 否则手指一滑出点击区，按住状态就丢了。
+        // 同一帧里已经按下的指针一并记录（例如一根手指先落在屏幕边缘、被 dock 激活层
+        // consume 掉 down 的第二根手指）：否则这次手势会被误判成单指，
+        // 双指滚动退化成指针拖动、双指轻点退化成左键。
         val downPositions = HashMap<PointerId, Offset>()
-        downPositions[firstDown.id] = firstDown.position
+        val firstDownPressed = firstDown.event.changes.filter { it.pressed }
+        firstDownPressed.forEach { downPositions[it.id] = it.position }
 
         val tracker = TrackpadGestureTracker(platform, thresholds)
-        // 先把第一根手指的按下位置喂给跟踪器：一次「按下即抬起」的轻点可能压根没有
+        // 先把按下位置喂给跟踪器：一次「按下即抬起」的轻点可能压根没有
         // 中间事件（DOWN 之后直接 UP），不在这里初始化的话 tracker 会认为本次手势
         // 没有发生过，finish() 也就判不出点击
-        tracker.onSample(buildFingerSample(listOf(firstDown), zones, downPositions))
+        tracker.onSample(buildFingerSample(firstDownPressed, zones, downPositions))
 
-        while (true) {
-            val event = awaitPointerEvent()
+        // 把一次指针事件喂给跟踪器（仲裁期间缓存的 + 之后实时的走同一条路）
+        fun consume(event: PointerEvent) {
             val pressed = event.changes.filter { it.pressed }
-            if (pressed.isEmpty()) break
             event.changes.forEach { change ->
                 if (change.pressed && !change.previousPressed) {
                     downPositions[change.id] = change.position
                 }
             }
-            val sample = buildFingerSample(pressed, zones, downPositions)
-            tracker.onSample(sample)?.let { gesture -> handler().onGesture(gesture) }
+            if (pressed.isEmpty()) return
+            val gesture = tracker.onSample(buildFingerSample(pressed, zones, downPositions))
+            if (gesture != null) {
+                haptics.onGesture(gesture)
+                handler().onGesture(gesture)
+            }
+        }
+
+        // 仲裁期间观察到的事件按原顺序补喂：等待时发生的手指位移照样折算成
+        // 指针移动 / 滚动，手势接管后不会有跳变
+        var gestureRunning = true
+        for (event in arbitration.observedEvents) {
+            consume(event)
+            if (event.changes.none { it.pressed }) {
+                gestureRunning = false
+                break
+            }
+        }
+
+        while (gestureRunning) {
+            val event = awaitPointerEvent()
+            consume(event)
+            if (event.changes.none { it.pressed }) gestureRunning = false
         }
 
         // ④ 所有手指抬起：做点击 / 四指轻点判定
-        tracker.finish()?.let { gesture -> handler().onGesture(gesture) }
+        tracker.finish()?.let { gesture ->
+            haptics.onGesture(gesture)
+            handler().onGesture(gesture)
+        }
     }
 }
 
 /**
- * 等第一根手指落下。
+ * 第一根「归本层」的手指落下时的信息：change 本身 + 它所在的那个 [PointerEvent]。
+ *
+ * 事件一起返回的理由见 [detectTrackpadGestures] 里对 `firstDownPressed` 的注释。
+ */
+private class TrackpadFirstDown(
+    val change: PointerInputChange,
+    val event: PointerEvent,
+)
+
+/**
+ * 等第一根「归本层」的手指落下。
  *
  * 与键盘按键层（`awaitFirstDown(requireUnconsumed = true)`）不同，这里**接受已被消费的
  * 按下**，前提是它落在底部点击区里：点击区的 pointerInput 会 consume 掉自己那份
  * down（否则拖拽时两根手指会互相抢），但触控区仍然必须看到这根手指，才能实现
  * 「按住左半 + 在触控区滑动 = 左键拖拽」。
  *
- * 其它被消费的按下（例如小键盘 sheet 里的按键、右上角「123」按钮）会被跳过，
+ * 其它被消费的按下（例如小键盘 sheet 里的按键、右上角「123」按钮、以及 dock 的
+ * 单指边缘内滑层在 Initial pass 里消费掉的那一根）会被跳过，
  * 这样小键盘打开时按数字键不会顺带把鼠标指针挪动。
  */
 private suspend fun AwaitPointerEventScope.awaitTrackpadDown(
     zones: ClickZones?,
-): PointerInputChange {
+): TrackpadFirstDown {
     while (true) {
         val event = awaitPointerEvent()
         event.changes.forEach { change ->
             if (change.pressed && !change.previousPressed) {
                 val inClickZone = zones != null &&
                     zones.contains(change.position.x, change.position.y)
-                if (!change.isConsumed || inClickZone) return change
+                if (!change.isConsumed || inClickZone) return TrackpadFirstDown(change, event)
             }
         }
     }

@@ -1,6 +1,9 @@
 package com.pocketkeyboard.app.gesture
 
 import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -39,12 +42,66 @@ class GestureArbiterTest {
     }
 
     @Test
+    fun `五指层迟迟不表态时 awaitDecision 不会提前超时`() = runBlocking {
+        // 事件驱动仲裁：不再有 60ms 固定窗口，五指层在 200ms 后才表态也必须等得到
+        val arbiter = GestureArbiter()
+
+        val deferred = async { arbiter.awaitDecision() }
+        delay(200)
+        arbiter.claimFiveFinger()
+
+        assertEquals(GestureOwner.FIVE_FINGER, withTimeout(1_000) { deferred.await() })
+    }
+
+    @Test
+    fun `五指层一放手 awaitDecision 立刻返回不等满超时`() = runBlocking {
+        val arbiter = GestureArbiter()
+
+        val elapsed = measureElapsedMillis {
+            runBlocking {
+                launch {
+                    delay(50)
+                    arbiter.releaseToTrackpad()
+                }
+                assertEquals(GestureOwner.TRACKPAD, withTimeout(1_000) { arbiter.awaitDecision() })
+            }
+        }
+
+        // 50ms 后放手就返回，而不是等满 1500ms 安全超时
+        assertTrue("实际耗时 ${elapsed}ms 说明等待了固定窗口", elapsed in 30L..600L)
+    }
+
+    @Test
     fun `窗口内无人表态时 awaitDecision 超时兜底为触控板层`() = runBlocking {
-        val arbiter = GestureArbiter(arbitrationWindow = GestureConstants.ARBITRATION_WINDOW_MS.milliseconds)
+        val arbiter = GestureArbiter(safetyTimeout = GestureConstants.ARBITRATION_SAFETY_TIMEOUT_MS.milliseconds)
 
         val owner = withTimeout(5_000) { arbiter.awaitDecision() }
 
         assertEquals(GestureOwner.TRACKPAD, owner)
+    }
+
+    @Test
+    fun `安全超时默认取 GestureConstants 的 1500ms`() = runBlocking {
+        val arbiter = GestureArbiter()
+
+        val elapsed = measureElapsedMillis {
+            runBlocking { arbiter.awaitDecision() }
+        }
+
+        assertEquals(GestureConstants.ARBITRATION_SAFETY_TIMEOUT_MS, arbiter.safetyTimeoutMs)
+        assertTrue("实际耗时 ${elapsed}ms 不在预期区间", elapsed in 1_400L..2_000L)
+    }
+
+    @Test
+    fun `安全超时可以调短`() = runBlocking {
+        val arbiter = GestureArbiter(safetyTimeout = 100.milliseconds)
+
+        val elapsed = measureElapsedMillis {
+            runBlocking { arbiter.awaitDecision() }
+        }
+
+        assertTrue("实际耗时 ${elapsed}ms 不在预期区间", elapsed in 80L..600L)
+        assertEquals(100L, arbiter.safetyTimeoutMs)
     }
 
     @Test
@@ -75,15 +132,6 @@ class GestureArbiterTest {
         assertEquals(GestureOwner.FIVE_FINGER, arbiter.owner.value)
     }
 
-    @Test
-    fun `仲裁窗口默认取 GestureConstants 的 60ms`() {
-        val arbiter = GestureArbiter()
-        // 通过「60ms 后超时」间接验证默认窗口时长
-        val elapsed = measureElapsedMillis {
-            runBlocking { arbiter.awaitDecision() }
-        }
-        assertTrue("实际耗时 ${elapsed}ms 不在预期区间", elapsed in 50L..400L)
-    }
     private fun measureElapsedMillis(block: () -> Unit): Long {
         val start = System.nanoTime()
         block()

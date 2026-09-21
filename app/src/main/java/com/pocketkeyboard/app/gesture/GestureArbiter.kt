@@ -1,6 +1,7 @@
 package com.pocketkeyboard.app.gesture
 
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,7 +28,7 @@ enum class GestureOwner {
  * ## 为什么需要它
  *
  * 五指手势层挂在页面容器最底层（`Modifier.pocketGestures` 挂在承载
- * AnimatedContent 的 Box 上），触控板层是它的子节点。Compose 的指针事件分发顺序是：
+ * `AnimatedContent` 的 Box 上），触控板层是它的子节点。Compose 的指针事件分发顺序是：
  *
  * ```
  * 一次 PointerEvent 会按三个 pass 依次送达同一棵 hit-test 路径上的所有节点：
@@ -42,13 +43,23 @@ enum class GestureOwner {
  *
  * ## 仲裁规则（写在产品需求里，实现必须严格遵守）
  *
- * > 按下后 60ms 内凑满 5 指则归五指手势层，否则归触控板手势。
+ * > 凑指窗口内凑满 5 指则归五指手势层；明确不是五指挥势时立刻归触控板手势。
  *
- * 实现方式：五指手势层在检测到第 5 根手指落下时调用 [claimFiveFinger]；
- * 触控板层在手势最开始调用 [awaitGestureOwner] 挂起等待，直到
- *  1. 五指层声明接管 → 返回 [GestureOwner.FIVE_FINGER]，触控板层直接放弃本次手势、
- *     不消费任何 change，事件自然继续留给五指层；
- *  2. 仲裁窗口耗尽 → 返回 [GestureOwner.TRACKPAD]，触控板层开始处理自己的 1–4 指手势。
+ * 实现方式：**事件驱动，没有固定窗口**。
+ *
+ * - 五指手势层在检测到第 5 根手指落下时调用 [claimFiveFinger]；
+ * - 五指手势层在「明确不是五指挥势」时调用 [releaseToTrackpad]，也就是下面两个时刻：
+ *   1. 凑指窗口到期（[GestureConstants.FINGER_GATHER_MAX_MS] 总上限，或距上一根新手指
+ *      超过 [GestureConstants.FINGER_GATHER_RENEW_MS]）仍不足 5 指；
+ *   2. 已按下的手指位移超过 [GestureConstants.FINGER_GATHER_MOVE_SLOP] 且没有新手指继续落下
+ *      —— 说明这是一次正在进行的触控板手势；
+ *   3. （兜底）所有手指都抬起了：手势在窗口内就结束，也必须立刻放手，否则触控板层
+ *      永远等不到裁决、这次轻点的点击判定就丢了。
+ * - 触控板层在手势最开始调用 [awaitGestureOwner]（内部转调
+ *   [GestureArbiter.awaitDecision] 语义）挂起等待，直到五指层表态：
+ *   1. 五指层声明接管 → 返回 [GestureOwner.FIVE_FINGER]，触控板层直接放弃本次手势、
+ *      不消费任何 change，事件自然继续留给五指层；
+ *   2. 五指层放手 → 返回 [GestureOwner.TRACKPAD]，触控板层开始处理自己的 1–4 指手势。
  *
  * 因为触控板层是「先挂起再动作」，所以即使它在 Main pass 里先看到第一根手指的 down，
  * 也绝不会在五指层表态之前消费事件 —— 这正是本类存在的意义。
@@ -67,7 +78,7 @@ enum class GestureOwner {
  *                 val down = awaitFirstDown(requireUnconsumed = true)
  *                 // 注意：必须用 awaitGestureOwner，不能直接调 arbiter.awaitDecision()
  *                 // （AwaitPointerEventScope 是 @RestrictsSuspension，详见该函数注释）
- *                 if (awaitGestureOwner(arbiter, down.uptimeMillis) == GestureOwner.FIVE_FINGER) {
+ *                 if (awaitGestureOwner(arbiter, down.uptimeMillis).owner == GestureOwner.FIVE_FINGER) {
  *                     // 归五指层：不要 consume，直接结束本轮 awaitEachGesture
  *                     return@awaitEachGesture
  *                 }
@@ -86,11 +97,13 @@ enum class GestureOwner {
  * 下一轮手势会被误判。`Modifier.pocketGestures` 的五指检测器内部已经负责在「所有手指抬起」
  * 后调用 [reset]，因此只要触控板层自己不滥用本类就不需要额外处理。
  *
- * @param arbitrationWindow 仲裁窗口，默认取 [GestureConstants.ARBITRATION_WINDOW_MS]（60ms）。
+ * @param safetyTimeout 触控板层等待裁决的安全超时，默认取
+ *    [GestureConstants.ARBITRATION_SAFETY_TIMEOUT_MS]。它**不是**仲裁窗口：正常流程里
+ *    五指层一定在凑指上限内表态，这个超时只在五指层没挂载时兜底，保证触控板层不会永久挂起。
  */
 class GestureArbiter(
-    private val arbitrationWindow: Duration =
-        GestureConstants.ARBITRATION_WINDOW_MS.milliseconds,
+    private val safetyTimeout: Duration =
+        GestureConstants.ARBITRATION_SAFETY_TIMEOUT_MS.milliseconds,
 ) {
 
     private val _owner = MutableStateFlow(GestureOwner.UNDECIDED)
@@ -101,6 +114,15 @@ class GestureArbiter(
     /** 便捷判断：本次手势是否已被五指手势层接管。 */
     val isFiveFingerActive: Boolean
         get() = _owner.value == GestureOwner.FIVE_FINGER
+
+    /**
+     * 触控板层等待裁决的安全超时（毫秒）。
+     *
+     * 暴露出来给 [awaitGestureOwner] 用：它是 `AwaitPointerEventScope` 的扩展函数，
+     * 不能直接读本类的私有字段。正常流程里五指层远早于这个时刻就表态了。
+     */
+    val safetyTimeoutMs: Long
+        get() = safetyTimeout.inWholeMilliseconds
 
     /**
      * 触控板层调用：标记一次新手势开始（第一根手指按下）。
@@ -116,14 +138,22 @@ class GestureArbiter(
     /**
      * 五指手势层调用：声明接管本次手势。
      *
-     * 只有在窗口内凑满 [GestureConstants.REQUIRED_FINGER_COUNT] 指时才允许调用
-     * （由调用方保证，五指检测器用 [GestureConstants.FINGER_GATHER_WINDOW_MS] 掐表）。
+     * 只有在凑指窗口内凑满 [GestureConstants.REQUIRED_FINGER_COUNT] 指时才允许调用
+     * （由调用方保证，五指检测器用 [GestureConstants.FINGER_GATHER_RENEW_MS] /
+     * [GestureConstants.FINGER_GATHER_MAX_MS] 掐表）。
      */
     fun claimFiveFinger() {
         _owner.value = GestureOwner.FIVE_FINGER
     }
 
-    /** 五指手势层调用：明确放弃本次手势，交还给触控板层。 */
+    /**
+     * 五指手势层调用：明确放弃本次手势，交还给触控板层。
+     *
+     * 调用时机（三种都必须**立即**调用，触控板层全靠它解除挂起）：
+     * 1. 凑指窗口到期仍不足 5 指；
+     * 2. 已按下的手指位移超过 [GestureConstants.FINGER_GATHER_MOVE_SLOP] 且没有新手指落下；
+     * 3. 所有手指都抬起了（手势在窗口内就结束）。
+     */
     fun releaseToTrackpad() {
         if (_owner.value == GestureOwner.UNDECIDED) {
             _owner.value = GestureOwner.TRACKPAD
@@ -133,14 +163,14 @@ class GestureArbiter(
     /**
      * 触控板层调用：挂起直到仲裁结果确定。
      *
-     * - 五指层先表态 → 立刻返回 [GestureOwner.FIVE_FINGER]；
-     * - 超过 [arbitrationWindow] 仍无表态 → 返回 [GestureOwner.TRACKPAD]（超时是安全默认值：
-     *   即便五指检测器因故没有运行，触控板层也只会多等一个窗口时长，不会永久卡住）。
+     * - 五指层表态 → 立刻返回对应归属；
+     * - 超过 [safetyTimeout] 仍无表态 → 返回 [GestureOwner.TRACKPAD]（兜底安全默认值：
+     *   即便五指检测器因故没有挂载，触控板层也只会多等一个安全超时，不会永久卡住）。
      */
     suspend fun awaitDecision(): GestureOwner {
         val alreadyDecided = _owner.value
         if (alreadyDecided != GestureOwner.UNDECIDED) return alreadyDecided
-        return withTimeoutOrNull(arbitrationWindow.inWholeMilliseconds) {
+        return withTimeoutOrNull(safetyTimeout.inWholeMilliseconds) {
             _owner.first { it != GestureOwner.UNDECIDED }
         } ?: GestureOwner.TRACKPAD
     }
@@ -152,6 +182,22 @@ class GestureArbiter(
         _owner.value = GestureOwner.UNDECIDED
     }
 }
+
+/**
+ * [awaitGestureOwner] 的返回结果。
+ *
+ * @param owner 手势归属
+ * @param observedEvents 等待裁决期间观察到的事件（按发生顺序）。五指层表态是**事件驱动**的，
+ *    而这些事件在被读到的那一刻还无法预知裁决，必须先缓存下来：裁决为
+ *    [GestureOwner.TRACKPAD] 时触控板层要把它们按原顺序补喂给自己的手势状态机，否则
+ *    「在窗口内就结束的手势」（快速轻点）会连一个事件都不剩，点击判定直接丢失；
+ *    等待期间发生的手指位移也会被折算成指针移动 / 滚动，手势不跳变。
+ *    裁决为 [GestureOwner.FIVE_FINGER] 时触控板层整体放弃本轮手势，这份缓存直接丢弃。
+ */
+class GestureArbitration(
+    val owner: GestureOwner,
+    val observedEvents: List<PointerEvent>,
+)
 
 /**
  * 在 `awaitEachGesture { }` 内部等待仲裁结果。
@@ -170,34 +216,44 @@ class GestureArbiter(
  * [GestureArbiter.claimFiveFinger]；本函数每拿到一个事件就复查一次 `owner`，于是最多一个事件
  * 的延迟就能拿到正确结果。
  *
- * 超时兜底：窗口耗尽仍未表态 → 返回 [GestureOwner.TRACKPAD]（即使五指检测器因故没挂载，
- * 触控板层也只会多等一个窗口时长，不会永久卡住）。
+ * 超时兜底：[arbiter.safetyTimeoutMs] 耗尽仍未表态 → 返回 [GestureOwner.TRACKPAD]
+ * （即使五指检测器因故没挂载，触控板层也只会多等一个安全超时，不会永久卡住）。
  *
  * ```kotlin
  * awaitEachGesture {
  *     val down = awaitFirstDown(requireUnconsumed = true)
- *     if (awaitGestureOwner(arbiter, down.uptimeMillis) == GestureOwner.FIVE_FINGER) {
+ *     val arbitration = awaitGestureOwner(arbiter, down.uptimeMillis)
+ *     if (arbitration.owner == GestureOwner.FIVE_FINGER) {
  *         return@awaitEachGesture   // 不消费，放行给五指挥势层
  *     }
- *     // 归本层：从这里开始写 1–4 指手势
+ *     // 归本层：arbitration.observedEvents 里的事件要按顺序补喂给手势状态机
  * }
  * ```
  */
 suspend fun AwaitPointerEventScope.awaitGestureOwner(
     arbiter: GestureArbiter,
     firstDownUptime: Long,
-): GestureOwner {
+): GestureArbitration {
     arbiter.owner.value.let { decided ->
-        if (decided != GestureOwner.UNDECIDED) return decided
+        if (decided != GestureOwner.UNDECIDED) {
+            return GestureArbitration(decided, emptyList())
+        }
     }
+    val observed = ArrayList<PointerEvent>()
     var latestUptime = firstDownUptime
-    val deadline = firstDownUptime + GestureConstants.ARBITRATION_WINDOW_MS
+    val deadline = firstDownUptime + arbiter.safetyTimeoutMs
     while (true) {
         val decided = arbiter.owner.value
-        if (decided != GestureOwner.UNDECIDED) return decided
+        if (decided != GestureOwner.UNDECIDED) {
+            return GestureArbitration(decided, observed)
+        }
         val remaining = deadline - latestUptime
-        if (remaining <= 0L) return GestureOwner.TRACKPAD
-        val event = withTimeoutOrNull(remaining) { awaitPointerEvent() } ?: return GestureOwner.TRACKPAD
+        if (remaining <= 0L) {
+            return GestureArbitration(GestureOwner.TRACKPAD, observed)
+        }
+        val event = withTimeoutOrNull(remaining) { awaitPointerEvent() }
+            ?: return GestureArbitration(GestureOwner.TRACKPAD, observed)
+        observed += event
         latestUptime = event.changes.maxOfOrNull { it.uptimeMillis } ?: latestUptime
     }
 }
