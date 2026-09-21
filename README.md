@@ -71,20 +71,6 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 > 说明：当前实现走经典蓝牙 HID profile，配对以系统 SSP 数字比对为准；配对页展示的 6 位数字用于支持走配对码输入的对端场景。
 
-## 演示截图维护（每次更新后必须执行）
-
-**每次 App 更新后，请重新截取 README 中的演示截图**，保证文档与最新 UI 一致：
-
-```bash
-# 前置：手机连接 USB（已开启调试并授权）、安装最新 APK、解锁屏幕
-tools/capture-screenshots.sh            # 自动选择唯一连接设备
-# 或
-tools/capture-screenshots.sh <设备序列号>  # adb devices 查看
-```
-
-脚本会自动依次截取配对页 / 键盘页 / 触控板页 / 数字小键盘四张图，覆盖写入 `docs/screenshots/01_pairing.png` ~ `04_numpad.png`。
-（脚本内的点击坐标按 1080×2400 屏幕标定，其他分辨率请调整脚本顶部常量。）
-
 ## 工程结构
 
 ```

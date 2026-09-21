@@ -70,20 +70,6 @@ Or simply open the project directory in Android Studio.
 
 > Note: the current implementation uses the classic Bluetooth HID profile, where pairing follows the system SSP numeric-comparison flow; the 6-digit code shown on the pairing screen supports hosts that use passkey entry.
 
-## Screenshot Maintenance (required after every update)
-
-**After every app update, re-capture the README screenshots** so the docs match the latest UI:
-
-```bash
-# Prereqs: phone connected via USB (USB debugging authorized), latest APK installed, screen unlocked
-tools/capture-screenshots.sh                 # auto-selects the single connected device
-# or
-tools/capture-screenshots.sh <device-serial> # see: adb devices
-```
-
-The script captures the pairing / keyboard / trackpad / keypad screens in order and overwrites `docs/screenshots/01_pairing.png` ~ `04_numpad.png`.
-(Tap coordinates are calibrated for a 1080×2400 screen; adjust the constants at the top of the script for other resolutions.)
-
 ## Project Structure
 
 ```

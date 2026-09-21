@@ -14,3 +14,7 @@ captures/
 
 # ZCode 工作流产物（不发布）
 .zcode/
+
+# 签名配置（含密码，不提交）
+keystore.properties
+*.jks
