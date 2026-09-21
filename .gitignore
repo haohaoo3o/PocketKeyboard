@@ -11,3 +11,6 @@ captures/
 *.aab
 *.keystore
 !debug.keystore
+
+# ZCode 工作流产物（不发布）
+.zcode/
