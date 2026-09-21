@@ -1,8 +1,5 @@
 package com.pocketkeyboard.app.keyboard
 
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -17,7 +14,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -28,18 +24,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,8 +36,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketkeyboard.app.R
 import com.pocketkeyboard.app.gesture.GestureArbiter
-import com.pocketkeyboard.app.gesture.PocketKeyGestureHandler
-import com.pocketkeyboard.app.gesture.pocketKeyGestures
 import com.pocketkeyboard.app.hid.HidController
 import com.pocketkeyboard.app.hid.HidTransport
 import com.pocketkeyboard.app.hid.HidUsage
@@ -56,11 +43,13 @@ import com.pocketkeyboard.app.hid.HidUsageMapper
 import com.pocketkeyboard.app.hid.MouseButton
 import com.pocketkeyboard.app.trackpad.NumpadSheet
 import com.pocketkeyboard.app.trackpad.NumpadToggleButton
+import com.pocketkeyboard.app.trackpad.TrackpadClickZone
+import com.pocketkeyboard.app.trackpad.TrackpadDivider
 import com.pocketkeyboard.app.trackpad.TrackpadGestureHandler
 import com.pocketkeyboard.app.trackpad.TrackpadHidActions
 import com.pocketkeyboard.app.trackpad.TrackpadMetrics
 import com.pocketkeyboard.app.trackpad.TrackpadThresholds
-import com.pocketkeyboard.app.trackpad.buttonZones
+import com.pocketkeyboard.app.trackpad.clickZones
 import com.pocketkeyboard.app.trackpad.trackpadGestures
 import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.MainViewModel
@@ -102,8 +91,9 @@ import kotlin.math.roundToInt
  * - 26 键键盘每行 u 总宽都是 [PhoneQwertyLayout.ROW_U]（10u）：第二 / 第三行字母用
  *   两侧留白（0.5u / 1.5u）把 9 / 7 颗字母居中对齐，行内按 weight 归一化填满屏宽，
  *   因此字母键宽三行一致、功能行与字母行宽度基准相同（Gboard 的同款做法）；
- * - 触控板区底部的左右点击区**复用触控板页同一份几何函数**（[buttonZones] +
- *   [TrackpadMetrics]）：手势层判定与视觉画的是同一块区域，不会「看到的和摸到的」不一致；
+ * - 触控板区底部的左右点击区与分割线**全部复用触控板页的同一批组件**
+ *   （[clickZones] 几何 + [TrackpadClickZone] 点击区 + [TrackpadDivider] 短竖线）：
+ *   手势层判定与视觉画的是同一块区域，不会「看到的和摸到的」不一致；
  *   触控板工程师若调整该规格，本页自动跟随。
  *
  * ## 26 键 QWERTY 的参考来源（联网调研，2026-09）
@@ -231,12 +221,6 @@ internal object FusedMetrics {
 
     /** 触控板区高度占融合页的比例；其余比例给 26 键键盘。 */
     const val TRACKPAD_HEIGHT_FRACTION: Float = 0.42f
-
-    /** 底部「短竖线」分割的宽度（左右点击区的分界）。 */
-    val CLICK_DIVIDER_WIDTH = 1.5.dp
-
-    /** 底部「短竖线」分割的高度。 */
-    val CLICK_DIVIDER_HEIGHT = 20.dp
 }
 
 /**
@@ -261,8 +245,6 @@ private fun FusedTrackpadArea(
     modifier: Modifier = Modifier,
 ) {
     val physicalButtons = platform == DevicePlatform.OTHER
-    val view = LocalView.current
-    val vibrator = rememberFusedVibrator()
 
     BoxWithConstraints(
         modifier = modifier
@@ -272,28 +254,21 @@ private fun FusedTrackpadArea(
                 handler = handler,
                 arbiter = arbiter,
                 thresholds = thresholds,
-                physicalButtonsEnabled = physicalButtons,
+                clickZonesEnabled = physicalButtons,
             ),
     ) {
         if (physicalButtons) {
-            // 与手势层完全相同的函数算出点击区矩形：画出来的和判定的是同一块区域
+            // 与手势层完全相同的函数算出点击带矩形：画出来的和判定的是同一块区域
             val density = LocalDensity.current
             val zones = remember(maxWidth, maxHeight, density) {
-                buttonZones(
+                clickZones(
                     widthPx = with(density) { maxWidth.toPx() },
                     heightPx = with(density) { maxHeight.toPx() },
                     density = density,
                 )
             }
-            val dividerWidthPx = with(density) { FusedMetrics.CLICK_DIVIDER_WIDTH.toPx() }
-            val dividerHeightPx = with(density) { FusedMetrics.CLICK_DIVIDER_HEIGHT.toPx() }
-            val parentWidthPx = with(density) { maxWidth.toPx() }
-            // 短竖线居于两个点击区中间的缝隙、与点击区同高居中
-            val dividerCenterYPx = zones.left.top + zones.left.height / 2f
 
-            FusedClickZone(
-                button = MouseButton.LEFT,
-                label = stringResource(R.string.trackpad_button_left),
+            TrackpadClickZone(
                 modifier = Modifier
                     .offset {
                         IntOffset(zones.left.left.roundToInt(), zones.left.top.roundToInt())
@@ -302,16 +277,10 @@ private fun FusedTrackpadArea(
                         width = with(density) { zones.left.width.toDp() },
                         height = with(density) { zones.left.height.toDp() },
                     ),
-                onPress = {
-                    performKeyHaptic(view, vibrator)
-                    transport.sendMouseButton(MouseButton.LEFT, true)
-                },
+                onPress = { transport.sendMouseButton(MouseButton.LEFT, true) },
                 onRelease = { transport.sendMouseButton(MouseButton.LEFT, false) },
-                onAbandoned = { transport.sendMouseButton(MouseButton.LEFT, false) },
             )
-            FusedClickZone(
-                button = MouseButton.RIGHT,
-                label = stringResource(R.string.trackpad_button_right),
+            TrackpadClickZone(
                 modifier = Modifier
                     .offset {
                         IntOffset(zones.right.left.roundToInt(), zones.right.top.roundToInt())
@@ -320,26 +289,24 @@ private fun FusedTrackpadArea(
                         width = with(density) { zones.right.width.toDp() },
                         height = with(density) { zones.right.height.toDp() },
                     ),
-                onPress = {
-                    performKeyHaptic(view, vibrator)
-                    transport.sendMouseButton(MouseButton.RIGHT, true)
-                },
+                onPress = { transport.sendMouseButton(MouseButton.RIGHT, true) },
                 onRelease = { transport.sendMouseButton(MouseButton.RIGHT, false) },
-                onAbandoned = { transport.sendMouseButton(MouseButton.RIGHT, false) },
             )
-            // 一条短竖线：左右点击分割的视觉分界（自身不拦截触摸，对触摸完全透明）
+            // 一条短竖线：左右点击分割的视觉分界（自身不拦截触摸，对触摸完全透明）。
+            // 复用触控板包的 TrackpadDivider：融合页与触控板页画出来的永远是同一条线
             Box(
                 modifier = Modifier
                     .offset {
-                        IntOffset(
-                            x = ((parentWidthPx - dividerWidthPx) / 2f).roundToInt(),
-                            y = (dividerCenterYPx - dividerHeightPx / 2f).roundToInt(),
-                        )
+                        IntOffset(zones.band.left.roundToInt(), zones.band.top.roundToInt())
                     }
-                    .width(FusedMetrics.CLICK_DIVIDER_WIDTH)
-                    .height(FusedMetrics.CLICK_DIVIDER_HEIGHT)
-                    .background(PureWhite.copy(alpha = 0.32f)),
-            )
+                    .size(
+                        width = with(density) { zones.band.width.toDp() },
+                        height = with(density) { zones.band.height.toDp() },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                TrackpadDivider()
+            }
         }
 
         // 右上角：小键盘开关（复用触控板页同一组件，视觉与行为一致）。
@@ -360,66 +327,6 @@ private fun FusedTrackpadArea(
             modifier = Modifier.align(Alignment.BottomCenter),
         )
     }
-}
-
-/**
- * 融合页触控区底部的左右点击区（仅 Windows 模式）。
- *
- * 与触控板页大圆角按键区的区别：本页空间更宝贵，点击区**不画边框、不常显**，
- * 只在按下时露出下陷反馈（与 [KeyCap] 同款边缘效果），静态时整块触控区是纯黑一片，
- * 仅靠中间的短竖线提示「这里可以点左右键」——这是融合页与触控板页约定的分割样式。
- */
-@Composable
-private fun FusedClickZone(
-    button: MouseButton,
-    label: String,
-    onPress: () -> Unit,
-    onRelease: () -> Unit,
-    onAbandoned: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var pressed by remember { mutableStateOf(false) }
-    var abandoned by remember { mutableStateOf(false) }
-    val pressedNow = pressed && !abandoned
-
-    val scale by animateFloatAsState(
-        targetValue = if (pressedNow) 0.96f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessHigh,
-        ),
-        label = "fusedClickZoneScale",
-    )
-
-    Box(
-        modifier = modifier
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .background(if (pressedNow) FusedPressedZoneBackground else PureBlack)
-            .then(if (pressedNow) Modifier.fusedSunkenEdges() else Modifier)
-            .semantics { contentDescription = label }
-            .pocketKeyGestures(
-                handler = PocketKeyGestureHandler(
-                    onPress = {
-                        pressed = true
-                        abandoned = false
-                        onPress()
-                    },
-                    onRelease = {
-                        pressed = false
-                        onRelease()
-                    },
-                    onAbandoned = {
-                        // 按下指针数达到 5：本次按下被判定为五指挥势，作废并补发松键
-                        abandoned = true
-                        pressed = false
-                        onAbandoned()
-                    },
-                ),
-            ),
-    )
 }
 
 /** 融合页触控区底部：当前控制设备名（无设备时显示未连接提示）。对触摸完全透明。 */
@@ -857,28 +764,4 @@ private fun rememberFusedVibrator(): android.os.Vibrator? {
                 as? android.os.Vibrator
         }
     }
-}
-
-/** 融合页点击区按下时的底色（与键盘页键帽按下态一致）。 */
-private val FusedPressedZoneBackground = Color(0xFF1A1A1E)
-
-/**
- * 「区域下沉」的边缘效果：顶部受光渐变 + 底部一条细亮线，
- * 与键盘页 [KeyCap] 的按下反馈同款（KeyCap 里的实现是 private，这里复刻一份，
- * 保证融合页的按压视觉与键盘页完全一致）。
- */
-private fun Modifier.fusedSunkenEdges(): Modifier = this.drawWithContent {
-    drawContent()
-    drawRect(
-        brush = Brush.verticalGradient(
-            0f to PureWhite.copy(alpha = 0.22f),
-            0.4f to Color.Transparent,
-        ),
-        size = size,
-    )
-    drawRect(
-        color = PureWhite.copy(alpha = 0.12f),
-        topLeft = Offset(0f, size.height - 1.5f),
-        size = Size(size.width, 1.5f),
-    )
 }

@@ -37,20 +37,25 @@ internal object TrackpadMetrics {
     /** 底部安全区高度：显示当前控制设备名，同时避开系统手势条。 */
     val SAFE_ZONE_HEIGHT = 28.dp
 
-    /** 物理按键模拟区高度。 */
-    val BUTTON_ZONE_HEIGHT = 54.dp
+    /**
+     * 底部点击带高度：左右两个点击区的高度，也是短竖线的垂直居中基准。
+     *
+     * 点击带本身不画边框、不印文字，整块区域静态时与纯黑背景融为一体，
+     * 只有按下时露出下陷反馈（见 [TrackpadClickZone]）。
+     */
+    val CLICK_BAND_HEIGHT = 36.dp
 
-    /** 物理按键模拟区距屏幕底部的距离（安全区 28dp + 12dp 间距）。 */
-    val BUTTON_ZONE_BOTTOM_MARGIN = 40.dp
+    /** 点击带距触控区底部的距离（底部安全区 28dp + 12dp 间距）。 */
+    val CLICK_BAND_BOTTOM_MARGIN = 40.dp
 
-    /** 物理按键模拟区左右外边距。 */
-    val BUTTON_ZONE_SIDE_MARGIN = 14.dp
+    /** 点击带中央短竖线的宽度（1–2dp，纯黑底上一条发丝线）。 */
+    val CLICK_DIVIDER_WIDTH = 1.5.dp
 
-    /** 物理按键模拟区最大宽度（窄屏上按屏宽比例收缩）。 */
-    val BUTTON_ZONE_MAX_WIDTH = 180.dp
+    /** 点击带中央短竖线的高度（28–36dp，比点击带略矮，上下各留一点呼吸）。 */
+    val CLICK_DIVIDER_HEIGHT = 32.dp
 
-    /** 物理按键模拟区宽度占触控区宽度的比例。 */
-    const val BUTTON_ZONE_WIDTH_FRACTION = 0.40f
+    /** 短竖线的白色透明度（30%–40%：看得见，但绝不抢眼）。 */
+    const val CLICK_DIVIDER_ALPHA = 0.35f
 
     /** 三指挥手（任务视图 / 切换应用 / 切换空间）的触发距离。 */
     val SWIPE_DISTANCE = 120.dp
@@ -72,10 +77,20 @@ internal data class ZoneRect(
     fun contains(x: Float, y: Float): Boolean = x >= left && x <= right && y >= top && y <= bottom
 }
 
-/** 触控区底部左右两个物理按键模拟区。 */
-internal data class ButtonZones(val left: ZoneRect, val right: ZoneRect) {
+/**
+ * 触控区底部的点击带：整条带（[band]）被中央短竖线分成左右两个点击区（[left] / [right]）。
+ *
+ * - 点左半 = 左键，点右半 = 右键；
+ * - 从左半按住拖动 = 左键拖拽，右半按住拖动 = 右键拖拽；
+ * - 两个点击区都不显示任何文字，静态时与纯黑背景融为一体。
+ */
+internal data class ClickZones(
+    val band: ZoneRect,
+    val left: ZoneRect,
+    val right: ZoneRect,
+) {
 
-    /** 坐标落在哪个按键区；都不在返回 null。 */
+    /** 坐标落在哪个点击区；都不在返回 null。 */
     fun zoneOf(x: Float, y: Float): MouseButton? = when {
         left.contains(x, y) -> MouseButton.LEFT
         right.contains(x, y) -> MouseButton.RIGHT
@@ -86,22 +101,28 @@ internal data class ButtonZones(val left: ZoneRect, val right: ZoneRect) {
 }
 
 /**
- * 按 [TrackpadMetrics] 计算两个物理按键模拟区的位置（px）。
+ * 按 [TrackpadMetrics] 计算底部点击带与左右两个点击区的位置（px）。
  *
- * UI 布局（`TrackpadSurface` 里的两个圆角矩形）与手势层（判断某根手指是不是
- * 「按住按键区的手指」）调用的是**同一个函数**，因此永远不会出现「看到的手势区
- * 和画出来的按键区对不上」的情况。
+ * 点击带横贯触控区整个宽度、贴在底部（安全区之上），短竖线画在带的正中央
+ * （= 触控区的水平中线），于是「左半 = 左键、右半 = 右键」。
+ *
+ * UI 布局（`TrackpadSurface` 里的两个点击区 + 分割线）与手势层（判断某根手指是不是
+ * 「按住点击区的手指」）调用的是**同一个函数**，因此永远不会出现「看到的手势区
+ * 和画出来的点击区对不上」的情况。
+ *
+ * 竖屏融合布局（`FusedControlScreen`）的触控板区也调用本函数：两边共用同一份几何。
  */
-internal fun buttonZones(widthPx: Float, heightPx: Float, density: Density): ButtonZones {
-    val zoneWidth = minOf(widthPx * TrackpadMetrics.BUTTON_ZONE_WIDTH_FRACTION,
-        with(density) { TrackpadMetrics.BUTTON_ZONE_MAX_WIDTH.toPx() })
-    val zoneHeight = with(density) { TrackpadMetrics.BUTTON_ZONE_HEIGHT.toPx() }
-    val side = with(density) { TrackpadMetrics.BUTTON_ZONE_SIDE_MARGIN.toPx() }
-    val bottom = with(density) { TrackpadMetrics.BUTTON_ZONE_BOTTOM_MARGIN.toPx() }
-    val top = heightPx - bottom - zoneHeight
-    return ButtonZones(
-        left = ZoneRect(side, top, side + zoneWidth, top + zoneHeight),
-        right = ZoneRect(widthPx - side - zoneWidth, top, widthPx - side, top + zoneHeight),
+internal fun clickZones(widthPx: Float, heightPx: Float, density: Density): ClickZones {
+    val bandHeight = with(density) { TrackpadMetrics.CLICK_BAND_HEIGHT.toPx() }
+    val bottomMargin = with(density) { TrackpadMetrics.CLICK_BAND_BOTTOM_MARGIN.toPx() }
+    // 触控区比点击带还矮的极端情形（超小窗口 / 预览）：贴顶放置，不让区域跑到画面外
+    val top = (heightPx - bottomMargin - bandHeight).coerceAtLeast(0f)
+    val bottom = minOf(top + bandHeight, heightPx)
+    val middle = widthPx / 2f
+    return ClickZones(
+        band = ZoneRect(0f, top, widthPx, bottom),
+        left = ZoneRect(0f, top, middle, bottom),
+        right = ZoneRect(middle, top, widthPx, bottom),
     )
 }
 
@@ -140,7 +161,8 @@ internal fun buttonZones(widthPx: Float, heightPx: Float, density: Density): But
  * @param platform 当前控制目标平台，决定三指 / 四指手势映射
  * @param handler 手势回调
  * @param arbiter **必须**与 `Modifier.pocketGestures` 使用同一个实例，否则仲裁无效
- * @param physicalButtonsEnabled 是否启用底部物理按键模拟区（Windows 模式为 true）
+ * @param clickZonesEnabled 是否启用底部的左右点击区（Windows 模式为 true；Apple 模式
+ *    单指 = 左键、双指 = 右键，不需要点击区）
  * @param thresholds px 级判定阈值
  * @param enabled false 时整个手势层不挂载（调试用）
  */
@@ -150,7 +172,7 @@ fun Modifier.trackpadGestures(
     handler: TrackpadGestureHandler,
     arbiter: GestureArbiter,
     thresholds: TrackpadThresholds,
-    physicalButtonsEnabled: Boolean,
+    clickZonesEnabled: Boolean,
     enabled: Boolean = true,
 ): Modifier {
     // rememberUpdatedState：pointerInput 的 key 只有 arbiter / platform / 阈值，
@@ -158,14 +180,14 @@ fun Modifier.trackpadGestures(
     val currentHandler by rememberUpdatedState(handler)
     return this.then(
         if (enabled) {
-            Modifier.pointerInput(arbiter, platform, thresholds, physicalButtonsEnabled) {
+            Modifier.pointerInput(arbiter, platform, thresholds, clickZonesEnabled) {
                 val density: Density = this
                 detectTrackpadGestures(
                     handler = { currentHandler },
                     arbiter = arbiter,
                     platform = platform,
                     thresholds = thresholds,
-                    physicalButtonsEnabled = physicalButtonsEnabled,
+                    clickZonesEnabled = clickZonesEnabled,
                     density = density,
                 )
             }
@@ -180,7 +202,7 @@ fun Modifier.trackpadGestures(
  *
  * ```
  * awaitEachGesture {                                  // 每轮都从「所有手指抬起」的干净状态开始
- *   awaitTrackpadDown(zones)                          // ① 等第一根手指落下（含按键区的按下）
+ *   awaitTrackpadDown(zones)                          // ① 等第一根手指落下（含点击区里的按下）
  *   awaitGestureOwner(arbiter, down.uptimeMillis)     // ② 仲裁：60ms 内凑满 5 指归五指层
  *        ├─ FIVE_FINGER → return，不消费 → 五指层接管
  *        └─ TRACKPAD   → ③ 逐事件喂给 TrackpadGestureTracker
@@ -193,13 +215,13 @@ private suspend fun PointerInputScope.detectTrackpadGestures(
     arbiter: GestureArbiter,
     platform: DevicePlatform,
     thresholds: TrackpadThresholds,
-    physicalButtonsEnabled: Boolean,
+    clickZonesEnabled: Boolean,
     density: Density,
 ) {
     awaitEachGesture {
-        // 按键区矩形只跟触控区尺寸有关，手势开始前算一次就够（尺寸变化会由重组触发新 pointerInput）
-        val zones = if (physicalButtonsEnabled) {
-            buttonZones(size.width.toFloat(), size.height.toFloat(), density)
+        // 点击区矩形只跟触控区尺寸有关，手势开始前算一次就够（尺寸变化会由重组触发新 pointerInput）
+        val zones = if (clickZonesEnabled) {
+            clickZones(size.width.toFloat(), size.height.toFloat(), density)
         } else {
             null
         }
@@ -220,8 +242,8 @@ private suspend fun PointerInputScope.detectTrackpadGestures(
         }
 
         // ③ 归触控板层：开始跟踪 1–4 指手势
-        // 记录每根手指「按下时」的位置：判断它是不是按在物理按键区必须用按下位置，
-        // 否则手指一滑出按键区，按住状态就丢了
+        // 记录每根手指「按下时」的位置：判断它是不是按在底部点击区必须用按下位置，
+        // 否则手指一滑出点击区，按住状态就丢了
         val downPositions = HashMap<PointerId, Offset>()
         downPositions[firstDown.id] = firstDown.position
 
@@ -253,23 +275,23 @@ private suspend fun PointerInputScope.detectTrackpadGestures(
  * 等第一根手指落下。
  *
  * 与键盘按键层（`awaitFirstDown(requireUnconsumed = true)`）不同，这里**接受已被消费的
- * 按下**，前提是它落在物理按键模拟区里：按键区的 pointerInput 会 consume 掉自己那份
+ * 按下**，前提是它落在底部点击区里：点击区的 pointerInput 会 consume 掉自己那份
  * down（否则拖拽时两根手指会互相抢），但触控区仍然必须看到这根手指，才能实现
- * 「按住左键区 + 在触控区滑动 = 左键拖拽」。
+ * 「按住左半 + 在触控区滑动 = 左键拖拽」。
  *
  * 其它被消费的按下（例如小键盘 sheet 里的按键、右上角「123」按钮）会被跳过，
  * 这样小键盘打开时按数字键不会顺带把鼠标指针挪动。
  */
 private suspend fun AwaitPointerEventScope.awaitTrackpadDown(
-    zones: ButtonZones?,
+    zones: ClickZones?,
 ): PointerInputChange {
     while (true) {
         val event = awaitPointerEvent()
         event.changes.forEach { change ->
             if (change.pressed && !change.previousPressed) {
-                val inButtonZone = zones != null &&
+                val inClickZone = zones != null &&
                     zones.contains(change.position.x, change.position.y)
-                if (!change.isConsumed || inButtonZone) return change
+                if (!change.isConsumed || inClickZone) return change
             }
         }
     }
@@ -279,13 +301,13 @@ private suspend fun AwaitPointerEventScope.awaitTrackpadDown(
  * 把一次事件里的按下指针整理成 [FingerSample]。
  *
  * 分区规则：
- * - 按下位置落在物理按键模拟区 → 计入 [FingerSample.buttonHeld]，**不**参与质心 / 间距 /
- *   旋转计算（它是「被按住的按键」，不是「在触控区滑动的手指」）；
+ * - 按下位置落在底部点击区（左半 / 右半）→ 计入 [FingerSample.buttonHeld]，
+ *   **不**参与质心 / 间距 / 旋转计算（它是「被按住的鼠标键」，不是「在触控区滑动的手指」）；
  * - 其余按下指针 → 触控区手指，参与全部几何计算。
  */
 private fun buildFingerSample(
     pressed: List<PointerInputChange>,
-    zones: ButtonZones?,
+    zones: ClickZones?,
     downPositions: Map<PointerId, Offset>,
 ): FingerSample {
     var buttonHeld: MouseButton? = null

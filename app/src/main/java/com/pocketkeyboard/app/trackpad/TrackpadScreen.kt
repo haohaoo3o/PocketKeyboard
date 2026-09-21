@@ -4,12 +4,8 @@ import android.content.Context
 import android.os.Build
 import android.os.Vibrator
 import android.os.VibratorManager
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -35,12 +31,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -55,8 +47,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketkeyboard.app.R
 import com.pocketkeyboard.app.gesture.GestureArbiter
-import com.pocketkeyboard.app.gesture.PocketKeyGestureHandler
-import com.pocketkeyboard.app.gesture.pocketKeyGestures
 import com.pocketkeyboard.app.hid.HidController
 import com.pocketkeyboard.app.hid.HidTransport
 import com.pocketkeyboard.app.hid.MouseButton
@@ -83,12 +73,14 @@ import kotlin.math.roundToInt
  * │                                       │
  * │            触控区（全屏纯黑）           │  ← 1–4 指手势 + 五指挥势仲裁
  * │                                       │
- * │   ┌──────────┐            ┌──────────┐ │  ← 仅 Windows 模式：左右物理按键模拟区
- * │   │  左键     │            │  右键     │ │
- * │   └──────────┘            └──────────┘ │
- * │         当前控制设备名（28dp 安全区）    │
+ * │                   │                   │  ← 仅 Windows 模式：底带中央一条短竖线，
+ * │         当前控制设备名（28dp 安全区）    │     把底带分成左右两个点击区
  * └───────────────────────────────────────┘
  * ```
+ *
+ * 底部的左右点击区**不画边框、不印文字**，静态时与纯黑背景融为一体，只有中央那条
+ * [TrackpadDivider] 短竖线提示「这里可以点左右键」：点左半 = 左键、点右半 = 右键，
+ * 从左半 / 右半按住拖动 = 对应键拖拽。Apple 模式（单指 = 左键、双指 = 右键）不显示点击区。
  *
  * ## 与其它模块的关系
  * - 手势经 [GestureArbiter] 与页面容器最底层的 `Modifier.pocketGestures` 仲裁：
@@ -182,11 +174,12 @@ fun TrackpadScreen(
 }
 
 /**
- * 触控区：全屏纯黑，承载 1–4 指手势；Windows 模式下底部叠两个物理按键模拟区。
+ * 触控区：全屏纯黑，承载 1–4 指手势；Windows 模式下底部叠一条点击带
+ * （左半 / 右半两个点击区 + 中央一条短竖线）。
  *
- * 按键模拟区是触控区的**子节点**（因此它们的手势也在触控区的 hit 路径上），
+ * 两个点击区是触控区的**子节点**（因此它们的手势也在触控区的 hit 路径上），
  * 但它们的 down 会被自己 consume 掉 —— 触控区的 [awaitTrackpadDown] 专门放行
- * 「落在按键区里的已消费按下」，否则「按住左键 + 滑动 = 左键拖拽」就看不到了。
+ * 「落在点击区里的已消费按下」，否则「按住左半 + 滑动 = 左键拖拽」就看不到了。
  */
 @Composable
 private fun TrackpadSurface(
@@ -197,9 +190,7 @@ private fun TrackpadSurface(
     transport: HidTransport,
     modifier: Modifier = Modifier,
 ) {
-    val physicalButtons = platform == DevicePlatform.OTHER
-    val view = LocalView.current
-    val vibrator = rememberTrackpadVibrator()
+    val clickZonesEnabled = platform == DevicePlatform.OTHER
 
     BoxWithConstraints(
         modifier = modifier
@@ -209,124 +200,58 @@ private fun TrackpadSurface(
                 handler = handler,
                 arbiter = arbiter,
                 thresholds = thresholds,
-                physicalButtonsEnabled = physicalButtons,
+                clickZonesEnabled = clickZonesEnabled,
             ),
     ) {
-        if (physicalButtons) {
-            // 用与手势层完全相同的函数算出按键区矩形，保证「画出来的」和「判定的」是同一块区域
+        if (clickZonesEnabled) {
+            // 用与手势层完全相同的函数算出点击带矩形，保证「画出来的」和「判定的」是同一块区域
             val density = LocalDensity.current
             val zones = remember(maxWidth, maxHeight, density) {
-                buttonZones(
+                clickZones(
                     widthPx = with(density) { maxWidth.toPx() },
                     heightPx = with(density) { maxHeight.toPx() },
                     density = density,
                 )
             }
-            PhysicalButtonZone(
-                button = MouseButton.LEFT,
-                label = stringResource(R.string.trackpad_button_left),
+
+            // 左半：轻点 = 左键，按住拖动 = 左键拖拽
+            TrackpadClickZone(
                 modifier = Modifier
                     .offset { IntOffset(zones.left.left.roundToInt(), zones.left.top.roundToInt()) }
-                    .size(with(density) { zones.left.width.toDp() }, with(density) { zones.left.height.toDp() }),
-                onPress = {
-                    performKeyHaptic(view, vibrator)
-                    transport.sendMouseButton(MouseButton.LEFT, true)
-                },
+                    .size(
+                        with(density) { zones.left.width.toDp() },
+                        with(density) { zones.left.height.toDp() },
+                    ),
+                onPress = { transport.sendMouseButton(MouseButton.LEFT, true) },
                 onRelease = { transport.sendMouseButton(MouseButton.LEFT, false) },
-                onAbandoned = { transport.sendMouseButton(MouseButton.LEFT, false) },
             )
-            PhysicalButtonZone(
-                button = MouseButton.RIGHT,
-                label = stringResource(R.string.trackpad_button_right),
+
+            // 右半：轻点 = 右键，按住拖动 = 右键拖拽
+            TrackpadClickZone(
                 modifier = Modifier
                     .offset { IntOffset(zones.right.left.roundToInt(), zones.right.top.roundToInt()) }
-                    .size(with(density) { zones.right.width.toDp() }, with(density) { zones.right.height.toDp() }),
-                onPress = {
-                    performKeyHaptic(view, vibrator)
-                    transport.sendMouseButton(MouseButton.RIGHT, true)
-                },
+                    .size(
+                        with(density) { zones.right.width.toDp() },
+                        with(density) { zones.right.height.toDp() },
+                    ),
+                onPress = { transport.sendMouseButton(MouseButton.RIGHT, true) },
                 onRelease = { transport.sendMouseButton(MouseButton.RIGHT, false) },
-                onAbandoned = { transport.sendMouseButton(MouseButton.RIGHT, false) },
             )
-        }
-    }
-}
 
-/**
- * 底部左右物理按键模拟区（仅 Windows 模式）。
- *
- * - 单指按下 → [HidTransport.sendMouseButton] 置起对应键 + 震感 + 视觉下陷；
- * - 手指抬起 → 松开对应键；被五指挥势作废时同样补发松键（避免卡键）；
- * - 与另一个按键区的视觉区分：右键区边框更亮（高亮一档），左键区只有很淡的一圈。
- *
- * 「按住本区 + 在触控区另一根手指滑动 = 对应键拖拽」由触控区的手势层实现
- * （它把按在本区的手指计入 [FingerSample.buttonHeld]），本组件只负责按键本身。
- */
-@Composable
-private fun PhysicalButtonZone(
-    button: MouseButton,
-    label: String,
-    onPress: () -> Unit,
-    onRelease: () -> Unit,
-    onAbandoned: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var pressed by remember { mutableStateOf(false) }
-    var abandoned by remember { mutableStateOf(false) }
-    val pressedNow = pressed && !abandoned
-
-    val scale by animateFloatAsState(
-        targetValue = if (pressedNow) 0.96f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessHigh,
-        ),
-        label = "buttonZoneScale",
-    )
-
-    // 右键区边框更亮：一眼能分出左右，又不破坏纯黑极简
-    val borderColor = PureWhite.copy(alpha = if (button == MouseButton.RIGHT) 0.45f else 0.18f)
-    val shape = RoundedCornerShape(16.dp)
-
-    Box(
-        modifier = modifier
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+            // 点击带正中央一条短竖线：左右点击区的视觉分界（自身不拦截触摸，对触摸完全透明）。
+            // 用一个与点击带同位置同尺寸的 Box 当锚点，分割线靠 Alignment.Center 自动居中
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(zones.band.left.roundToInt(), zones.band.top.roundToInt()) }
+                    .size(
+                        with(density) { zones.band.width.toDp() },
+                        with(density) { zones.band.height.toDp() },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                TrackpadDivider()
             }
-            .clip(shape)
-            .background(if (pressedNow) PressedZoneBackground else PureBlack)
-            .then(if (pressedNow) Modifier.sunkenEdges() else Modifier)
-            .border(width = 1.dp, color = borderColor, shape = shape)
-            .semantics { contentDescription = label }
-            .pocketKeyGestures(
-                handler = PocketKeyGestureHandler(
-                    onPress = {
-                        pressed = true
-                        abandoned = false
-                        onPress()
-                    },
-                    onRelease = {
-                        pressed = false
-                        onRelease()
-                    },
-                    onAbandoned = {
-                        // 按下指针数达到 5：本次按下被判定为五指挥势，作废并补发松键
-                        abandoned = true
-                        pressed = false
-                        onAbandoned()
-                    },
-                ),
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = PureWhite.copy(alpha = if (pressedNow) 0.85f else 0.35f),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-        )
+        }
     }
 }
 
@@ -428,28 +353,7 @@ private fun NumpadGlyph(
     }
 }
 
-/** 按键模拟区按下时的底色（比纯黑略亮一档，与键盘页键帽按下态一致）。 */
-private val PressedZoneBackground = Color(0xFF1A1A1E)
-
-/** 「区域下沉」的边缘效果：顶部受光渐变 + 底部一条细亮线，与键盘页 [com.pocketkeyboard.app.keyboard.KeyCap] 同款。 */
-private fun Modifier.sunkenEdges(): Modifier = this.drawWithContent {
-    drawContent()
-    drawRect(
-        brush = Brush.verticalGradient(
-            0f to PureWhite.copy(alpha = 0.22f),
-            0.4f to Color.Transparent,
-        ),
-        size = size,
-    )
-    drawRect(
-        color = PureWhite.copy(alpha = 0.12f),
-        topLeft = Offset(0f, size.height - 1.5f),
-        size = Size(size.width, 1.5f),
-    )
-}
-
-/**
- * 触控板页自建 HID 传输：调用方没有传入 [HidTransport] 时，用 `HidController`
+/** 触控板页自建 HID 传输：调用方没有传入 [HidTransport] 时，用 `HidController`
  * 组装系统实现（或不可用时的空实现），并随组合生命周期启停。
  *
  * 与键盘页 `rememberKeyboardTransport` 完全同构。

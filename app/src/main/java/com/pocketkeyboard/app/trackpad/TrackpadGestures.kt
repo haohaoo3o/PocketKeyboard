@@ -112,8 +112,9 @@ sealed interface TrackpadGesture {
 /**
  * 一个指针事件周期内、触控板层关心的手指快照。
  *
- * @param trackpadFingers 触控区手指数（**不含**按住左右物理按键区的手指）
- * @param buttonHeld 当前被按住的物理按键区（null 表示没有）；按住时的滑动 = 对应键拖拽
+ * @param trackpadFingers 触控区手指数（**不含**按住底部点击区的手指）
+ * @param buttonHeld 当前被按住的底部点击区（左半 = 左键 / 右半 = 右键，null 表示没有）；
+ *    按住时的滑动 = 对应键拖拽
  * @param centroidX 触控区手指质心横坐标（px）
  * @param centroidY 触控区手指质心纵坐标（px）
  * @param spread 指尖到质心的平均距离（px），少于 2 指时为 0
@@ -204,8 +205,8 @@ internal class TrackpadGestureTracker(
      * 调用方负责在返回非 null 时把它交给 [TrackpadGestureHandler]。
      */
     fun onSample(sample: FingerSample): TrackpadGesture? {
-        // 只有按键区的手指（例如单手按住左键区）：触控板层不产出任何手势，
-        // 按键的按下 / 松开由按键区自己的 pointerInput 负责
+        // 只有点击区的手指（例如单手按住左半区）：触控板层不产出任何手势，
+        // 按键的按下 / 松开由点击区自己的 pointerInput 负责
         if (sample.trackpadFingers == 0) return null
 
         if (!initialized) {

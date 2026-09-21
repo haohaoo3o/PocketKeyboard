@@ -30,6 +30,7 @@
     <string name="pairing_pin_placeholder">······</string>
     <string name="pairing_devices_title">已配对设备</string>
     <string name="pairing_devices_empty">暂无已配对设备</string>
+    <string name="pairing_devices_empty_unconfirmed">设备确认平台类型后会显示在这里</string>
     <string name="pairing_device_platform_apple">苹果设备</string>
     <string name="pairing_device_platform_other">其他设备</string>
     <string name="pairing_device_active">当前控制目标</string>
@@ -38,6 +39,8 @@
     <string name="pairing_platform_dialog_title">这是苹果设备还是其他设备？</string>
     <string name="pairing_platform_dialog_message">针对「%1$s」选择平台类型，选择后会记住，下次连接同一设备不再询问。</string>
     <string name="pairing_platform_dialog_cancel">取消</string>
+    <string name="pairing_platform_icon_apple">苹果设备图标</string>
+    <string name="pairing_platform_icon_other">其他设备图标</string>
 
     <!-- 键盘页 -->
     <string name="keyboard_title">键盘</string>
@@ -217,8 +220,6 @@
     <string name="trackpad_title">触控板</string>
     <string name="trackpad_active_device_format">控制设备：%1$s（%2$s）</string>
     <string name="trackpad_no_device">未选择控制设备</string>
-    <string name="trackpad_button_left">左键</string>
-    <string name="trackpad_button_right">右键</string>
     <string name="trackpad_numpd_toggle">123</string>
     <string name="cd_numpad_toggle">打开或收起数字小键盘</string>
     <string name="numpad_title">数字小键盘</string>
