@@ -10,6 +10,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,12 +20,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,10 +48,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,6 +82,18 @@ import kotlin.random.Random
 
 /** 配对码位数：6 位数字。 */
 private const val PIN_LENGTH = 6
+
+/** 「可被发现」胶囊按钮的可视高度（dp）：文字用 bodySmall 档，固定高度 + 垂直居中不裁切。 */
+private const val DISCOVERABLE_BUTTON_HEIGHT = 40
+
+/** 「可被发现」按钮在可视高度之外额外外扩的热区（dp）：40 + 4×2 = 48dp 最小触控目标。 */
+private const val DISCOVERABLE_TOUCH_OVERHANG = 4
+
+/** 平台图标尺寸（dp）：20–24dp 区间内，与设备名首行基线对齐。 */
+private const val PLATFORM_ICON_SIZE = 22
+
+/** 平台图标 SVG 路径的视口边长（simple-icons 的 24×24 视口）。 */
+private const val PLATFORM_ICON_VIEWPORT = 24f
 
 /** CONTROL 按钮按下时的缩放（苹果式按压手感）。 */
 private const val PRESSED_SCALE = 0.97f
@@ -149,6 +169,14 @@ fun PairingScreen(
     // 设备列表以 viewModel.pairedDevices 为唯一来源；系统 bonded 设备（localBluetooth）
     // 与 HID 后端上报的列表（bridge 写进 ViewModel）两条来源在这里合并去重，
     // 并用 DataStore 中持久化的平台类型校正（不覆盖其他模块已写入的平台信息）。
+    //
+    // 回写策略（与「列表只展示已确认平台设备」配套）：这里刻意回写全量合并结果、
+    // 不按平台确认状态过滤。pairedDevices 是跨模块契约——MainActivity 的五指横滑
+    // 循环切设备、HID bridge 的 onPairedDevicesChanged 都会写它；若在这里按平台
+    // 过滤回写，bridge 每次上报都会把设备重新写回来、本 Effect 再过滤掉，形成来回
+    // 覆盖；全部设备都未确认时合并结果还是空列表，写回去会把契约数据清空。
+    // 「不展示未确认设备」只做在下方 DeviceList 调用处的展示层过滤，不动契约本身；
+    // 写入前的 `merged != 现值` 相等性检查保证本 Effect 不会自我触发形成死循环。
     LaunchedEffect(platforms, localBluetooth.devices, pairedDevices) {
         val merged = (pairedDevices + localBluetooth.devices)
             .distinctBy { it.address }
@@ -210,9 +238,15 @@ fun PairingScreen(
             PinCodeBlock(pinCode = pinCode)
         }
 
-        // 已配对设备：点击切换当前控制目标
+        // 已配对设备：点击切换当前控制目标。
+        // 只展示平台已确定的设备（DataStore 里有记录，platforms[address] != null）：
+        // 未确认平台的设备若按默认的「其他设备」展示会误导用户（苹果设备拿到
+        // Windows 布局），因此先不展示，待平台选择弹窗写入记录后再出现。未确认的
+        // 设备仍保留在 viewModel.pairedDevices 里（供五指横滑循环 / HID 桥接），
+        // 只是不在本页列表出现。
+        val confirmedDevices = pairedDevices.filter { platforms[it.address] != null }
         DeviceList(
-            devices = pairedDevices,
+            devices = confirmedDevices,
             activeDevice = activeDevice,
             onDeviceClick = { device ->
                 val knownPlatform = platforms[device.address]
@@ -227,6 +261,8 @@ fun PairingScreen(
                     viewModel.setActiveDevice(device.copy(platform = knownPlatform))
                 }
             },
+            // 有已配对设备但都没有确认平台时，空态文案要说清「为什么列表是空的」
+            hasUnconfirmedDevices = pairedDevices.any { platforms[it.address] == null },
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f, fill = false)
@@ -320,16 +356,21 @@ private fun PairingHeader(
                 )
             }
             Spacer(modifier = Modifier.width(12.dp))
+            // 「可被发现」胶囊按钮：文案降到 bodySmall 档、宽度 wrap content 并带
+            // 足够水平内边距（不再贴边），固定 40dp 高度由 Box 垂直居中不裁切；
+            // 视觉之外再外扩上下各 4dp 透明热区，点击热区达到 48dp。
             AppleButton(
                 text = stringResource(R.string.pairing_make_discoverable),
                 onClick = onMakeDiscoverable,
                 enabled = localBluetooth.available && localBluetooth.permissionGranted,
-                modifier = Modifier.height(36.dp),
+                modifier = Modifier.height(DISCOVERABLE_BUTTON_HEIGHT.dp),
                 shape = RoundedCornerShape(percent = 50),
                 containerColor = Color.Transparent,
                 contentColor = PureWhite.copy(alpha = 0.85f),
                 borderColor = PureWhite.copy(alpha = 0.35f),
-                textStyle = MaterialTheme.typography.labelLarge,
+                textStyle = MaterialTheme.typography.bodySmall,
+                contentPadding = PaddingValues(horizontal = 18.dp),
+                touchPadding = PaddingValues(vertical = DISCOVERABLE_TOUCH_OVERHANG.dp),
             )
         }
         Spacer(modifier = Modifier.height(8.dp))
@@ -407,12 +448,18 @@ private fun PinCodeBlock(pinCode: String?, modifier: Modifier = Modifier) {
     }
 }
 
-/** 已配对设备列表：设备名 + 平台类型，点击切换当前控制目标。 */
+/**
+ * 已配对设备列表：设备名 + 平台类型，点击切换当前控制目标。
+ *
+ * @param devices 只传平台已确定的设备（DataStore 有记录），未确认的设备由调用处过滤掉。
+ * @param hasUnconfirmedDevices 是否存在「已配对但平台未确认」的设备，用于空态文案。
+ */
 @Composable
 private fun DeviceList(
     devices: List<PairedDevice>,
     activeDevice: PairedDevice?,
     onDeviceClick: (PairedDevice) -> Unit,
+    hasUnconfirmedDevices: Boolean,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -425,7 +472,11 @@ private fun DeviceList(
         Spacer(modifier = Modifier.height(10.dp))
         if (devices.isEmpty()) {
             Text(
-                text = stringResource(R.string.pairing_devices_empty),
+                text = if (hasUnconfirmedDevices) {
+                    stringResource(R.string.pairing_devices_empty_unconfirmed)
+                } else {
+                    stringResource(R.string.pairing_devices_empty)
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = PureWhite.copy(alpha = 0.4f),
                 modifier = Modifier.padding(vertical = 12.dp),
@@ -443,7 +494,7 @@ private fun DeviceList(
     }
 }
 
-/** 单个已配对设备行。 */
+/** 单个已配对设备行：平台图标 + 设备名 + 平台类型 + 当前控制目标角标。 */
 @Composable
 private fun DeviceRow(
     device: PairedDevice,
@@ -458,8 +509,15 @@ private fun DeviceRow(
             .background(MinimalGray)
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        // 顶端对齐：22dp 平台图标与设备名首行文字基线对齐（行内还有一行平台小字，
+        // 居中对齐会把图标压到两行文字的中间，低于设备名）
+        verticalAlignment = Alignment.Top,
     ) {
+        PlatformIcon(
+            platform = device.platform,
+            contentDescription = stringResource(platformIconDescription(device.platform)),
+        )
+        Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = device.name,
@@ -490,6 +548,7 @@ private fun DeviceRow(
                     text = stringResource(R.string.pairing_device_active),
                     style = MaterialTheme.typography.labelLarge,
                     color = PureWhite.copy(alpha = 0.75f),
+                    maxLines = 1,
                 )
             }
         }
@@ -501,6 +560,12 @@ private fun DeviceRow(
 private fun platformLabel(platform: DevicePlatform): String = when (platform) {
     DevicePlatform.APPLE -> stringResource(R.string.pairing_device_platform_apple)
     DevicePlatform.OTHER -> stringResource(R.string.pairing_device_platform_other)
+}
+
+/** 平台图标的读屏描述（TalkBack 与 UI 测试用；图标本身不识字）。 */
+private fun platformIconDescription(platform: DevicePlatform): Int = when (platform) {
+    DevicePlatform.APPLE -> R.string.pairing_platform_icon_apple
+    DevicePlatform.OTHER -> R.string.pairing_platform_icon_other
 }
 
 /** CONTROL 大按钮：未连接设备时灰色不可点动，连接后黑底白字可点击进入键盘页。 */
@@ -543,6 +608,13 @@ private fun ColumnScope.ControlHint(visible: Boolean, modifier: Modifier = Modif
 
 /**
  * 苹果式按钮：无涟漪，按下缩放到 [PRESSED_SCALE]，松开以弹性弹簧回弹。
+ *
+ * 分内外两层：外层只承担点击热区（[touchPadding] 外扩出的部分完全透明，
+ * 视觉不变），内层是可见的胶囊 / 圆角矩形（背景、边框、按压缩放都在内层）。
+ * 这样可以在不改变外观的前提下把任意小按钮的热区扩大到 48dp 最小触控目标。
+ *
+ * @param contentPadding 可视层的水平 / 垂直内边距（文案不再贴边）。
+ * @param touchPadding 热区在可视层之外的外扩量，不产生任何视觉变化。
  */
 @Composable
 private fun AppleButton(
@@ -555,6 +627,8 @@ private fun AppleButton(
     contentColor: Color = PureWhite,
     borderColor: Color? = null,
     textStyle: TextStyle = MaterialTheme.typography.titleLarge,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 20.dp),
+    touchPadding: PaddingValues = PaddingValues(0.dp),
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
@@ -566,21 +640,10 @@ private fun AppleButton(
         ),
         label = "appleButtonPressScale",
     )
+    // 外层：热区层。padding 出的区域透明，点击与按压判定都发生在这一层。
     Box(
-        modifier = modifier
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .clip(shape)
-            .background(containerColor)
-            .then(
-                if (borderColor != null) {
-                    Modifier.border(width = 1.dp, color = borderColor, shape = shape)
-                } else {
-                    Modifier
-                },
-            )
+        modifier = Modifier
+            .padding(touchPadding)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
@@ -589,11 +652,31 @@ private fun AppleButton(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = text,
-            style = textStyle,
-            color = if (enabled) contentColor else contentColor.copy(alpha = DISABLED_ALPHA),
-        )
+        // 内层：视觉层。modifier（高度 / 宽度）作用于这一层，按压缩放也在这里。
+        Box(
+            modifier = modifier
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                }
+                .clip(shape)
+                .background(containerColor)
+                .then(
+                    if (borderColor != null) {
+                        Modifier.border(width = 1.dp, color = borderColor, shape = shape)
+                    } else {
+                        Modifier
+                    },
+                )
+                .padding(contentPadding),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = text,
+                style = textStyle,
+                color = if (enabled) contentColor else contentColor.copy(alpha = DISABLED_ALPHA),
+            )
+        }
     }
 }
 
@@ -629,11 +712,17 @@ private fun PlatformDialog(
                 Spacer(modifier = Modifier.height(20.dp))
                 PlatformOption(
                     text = stringResource(R.string.pairing_device_platform_apple),
+                    icon = {
+                        PlatformIcon(platform = DevicePlatform.APPLE, contentDescription = null)
+                    },
                     onClick = { onSelect(DevicePlatform.APPLE) },
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 PlatformOption(
                     text = stringResource(R.string.pairing_device_platform_other),
+                    icon = {
+                        PlatformIcon(platform = DevicePlatform.OTHER, contentDescription = null)
+                    },
                     onClick = { onSelect(DevicePlatform.OTHER) },
                 )
                 TextButton(
@@ -650,9 +739,14 @@ private fun PlatformDialog(
     }
 }
 
-/** 平台选择弹窗里的单个选项。 */
+/** 平台选择弹窗里的单个选项：平台图标 + 文案，整体水平居中。 */
 @Composable
-private fun PlatformOption(text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun PlatformOption(
+    text: String,
+    icon: @Composable () -> Unit,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -662,7 +756,84 @@ private fun PlatformOption(text: String, onClick: () -> Unit, modifier: Modifier
             .padding(vertical = 14.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = text, style = MaterialTheme.typography.bodyLarge, color = PureWhite)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            icon()
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(text = text, style = MaterialTheme.typography.bodyLarge, color = PureWhite)
+        }
+    }
+}
+
+/**
+ * 平台标识图标：苹果 logo / Windows logo（四格），纯代码矢量、白色填充。
+ *
+ * 路径数据取自 simple-icons（CC0 授权）的 24×24 视口 SVG path 字符串，用 Compose
+ * 自带的 [PathParser] 解析成 [Path]，再由 [Canvas] 按图标尺寸缩放绘制；不引入
+ * 任何第三方图标库，也没有位图资源。
+ */
+private object PlatformIcons {
+
+    /** 苹果 logo（带叶子与咬口的剪影）。 */
+    val Apple: Path by lazy {
+        PathParser().parsePathString(APPLE_LOGO_PATH).toPath(Path())
+    }
+
+    /** Windows logo（四格窗格）。 */
+    val Windows: Path by lazy {
+        PathParser().parsePathString(WINDOWS_LOGO_PATH).toPath(Path())
+    }
+
+    fun of(platform: DevicePlatform): Path = when (platform) {
+        DevicePlatform.APPLE -> Apple
+        DevicePlatform.OTHER -> Windows
+    }
+
+    private const val APPLE_LOGO_PATH =
+        "M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014" +
+            "-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039" +
+            " 1.52-.065 2.09-.987 3.936-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48" +
+            " 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221" +
+            "-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376" +
+            "-2-.156-3.675 1.09-4.61 1.09z" +
+            "M15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818" +
+            "-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"
+
+    private const val WINDOWS_LOGO_PATH =
+        "M0 3.449L9.75 2.1v9.451H0" +
+            "m10.949-9.602L24 0v11.4H10.949" +
+            "M0 12.6h9.75v9.451L0 20.699" +
+            "M10.949 12.6H24V24l-12.9-1.801"
+}
+
+/**
+ * 设备平台图标（[PLATFORM_ICON_SIZE] 白色矢量）。
+ *
+ * @param contentDescription 读屏描述；传 null 时不给图标单独挂语义（旁边已有
+ *     等价文字时避免读屏重复）。
+ */
+@Composable
+private fun PlatformIcon(
+    platform: DevicePlatform,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+) {
+    val path = remember(platform) { PlatformIcons.of(platform) }
+    Canvas(
+        modifier = modifier
+            .size(PLATFORM_ICON_SIZE.dp)
+            .then(
+                if (contentDescription != null) {
+                    Modifier.semantics { this.contentDescription = contentDescription }
+                } else {
+                    Modifier
+                },
+            ),
+    ) {
+        // SVG 路径是 24×24 视口，绘制时按图标实际尺寸等比缩放
+        val factor = size.minDimension / PLATFORM_ICON_VIEWPORT
+        scale(factor, factor) {
+            drawPath(path = path, color = PureWhite)
+        }
     }
 }
 
