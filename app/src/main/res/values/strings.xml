@@ -1,0 +1,300 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">口袋键鼠</string>
+
+    <!-- 权限用途说明 -->
+    <string name="permission_bluetooth_title">蓝牙权限</string>
+    <string name="permission_bluetooth_reason">需要蓝牙权限以发现、连接并控制你的键鼠接收端设备。</string>
+    <string name="permission_location_title">位置权限</string>
+    <string name="permission_location_reason">Android 11 及以下系统需要位置权限才能扫描周围的蓝牙 LE 外设。</string>
+    <string name="permission_notification_title">通知权限</string>
+    <string name="permission_notification_reason">需要通知权限以显示连接状态与后台运行提示。</string>
+
+    <!-- 页面标题 -->
+    <string name="mode_pairing">配对</string>
+    <string name="mode_keyboard">键盘</string>
+    <string name="mode_trackpad">触控板</string>
+
+    <!-- 配对页 -->
+    <string name="pairing_title">设备配对</string>
+    <string name="pairing_local_name_label">本机蓝牙名称</string>
+    <string name="pairing_local_name_unknown">未知名称</string>
+    <string name="pairing_bluetooth_unavailable">本机不支持蓝牙</string>
+    <string name="pairing_permission_needed">需要蓝牙权限才能读取本机名称与已配对设备</string>
+    <string name="pairing_permission_action">授予权限</string>
+    <string name="pairing_make_discoverable">可被发现</string>
+    <string name="pairing_discoverable_status_on">可被发现：剩余 %1$d 秒</string>
+    <string name="pairing_discoverable_status_off">可被发现：未开启</string>
+    <string name="pairing_pin_label">配对码</string>
+    <string name="pairing_pin_hint">在被控设备的蓝牙菜单里选择本设备，然后输入这 6 位配对码。</string>
+    <string name="pairing_pin_placeholder">······</string>
+    <string name="pairing_devices_title">已配对设备</string>
+    <string name="pairing_devices_empty">暂无已配对设备</string>
+    <string name="pairing_device_platform_apple">苹果设备</string>
+    <string name="pairing_device_platform_other">其他设备</string>
+    <string name="pairing_device_active">当前控制目标</string>
+    <string name="pairing_control">CONTROL</string>
+    <string name="pairing_control_hint">请先在上方已配对设备中选择一个设备</string>
+    <string name="pairing_platform_dialog_title">这是苹果设备还是其他设备？</string>
+    <string name="pairing_platform_dialog_message">针对「%1$s」选择平台类型，选择后会记住，下次连接同一设备不再询问。</string>
+    <string name="pairing_platform_dialog_cancel">取消</string>
+
+    <!-- 键盘页 -->
+    <string name="keyboard_title">键盘</string>
+    <string name="keyboard_fn_hint">fn + 空格 背光 · fn + C 键帽颜色 · fn + S 字号 · fn + V 震感</string>
+
+    <!-- ============================================================
+         键盘页 87 键 TKL（app/src/main/java/com/pocketkeyboard/app/keyboard/）
+         键帽字形 / 媒体图标无障碍描述 / fn 组合键 HUD 文案
+         ============================================================ -->
+
+    <!-- 行 1：Esc + F1–F12 + 三颗系统键 -->
+    <string name="key_esc">esc</string>
+    <string name="key_f1">F1</string>
+    <string name="key_f2">F2</string>
+    <string name="key_f3">F3</string>
+    <string name="key_f4">F4</string>
+    <string name="key_f5">F5</string>
+    <string name="key_f6">F6</string>
+    <string name="key_f7">F7</string>
+    <string name="key_f8">F8</string>
+    <string name="key_f9">F9</string>
+    <string name="key_f10">F10</string>
+    <string name="key_f11">F11</string>
+    <string name="key_f12">F12</string>
+    <string name="key_f1_small">f1</string>
+    <string name="key_f2_small">f2</string>
+    <string name="key_f3_small">f3</string>
+    <string name="key_f4_small">f4</string>
+    <string name="key_f5_small">f5</string>
+    <string name="key_f6_small">f6</string>
+    <string name="key_f7_small">f7</string>
+    <string name="key_f8_small">f8</string>
+    <string name="key_f9_small">f9</string>
+    <string name="key_f10_small">f10</string>
+    <string name="key_f11_small">f11</string>
+    <string name="key_f12_small">f12</string>
+    <string name="key_prtsc">PrtSc</string>
+    <string name="key_scrlk">ScrLk</string>
+    <string name="key_pause">Pause</string>
+
+    <!-- 行 2：数字 1–0 与标点 + Backspace -->
+    <string name="key_grave">`</string>
+    <string name="key_1">1</string>
+    <string name="key_2">2</string>
+    <string name="key_3">3</string>
+    <string name="key_4">4</string>
+    <string name="key_5">5</string>
+    <string name="key_6">6</string>
+    <string name="key_7">7</string>
+    <string name="key_8">8</string>
+    <string name="key_9">9</string>
+    <string name="key_0">0</string>
+    <string name="key_minus">-</string>
+    <string name="key_equal">=</string>
+    <string name="key_backspace">delete</string>
+    <string name="key_tilde">~</string>
+    <string name="key_exclam">!</string>
+    <string name="key_at">@</string>
+    <string name="key_hash">#</string>
+    <string name="key_dollar">$</string>
+    <string name="key_percent">%</string>
+    <string name="key_caret">^</string>
+    <string name="key_ampersand">&amp;</string>
+    <string name="key_asterisk">*</string>
+    <string name="key_lparen">(</string>
+    <string name="key_rparen">)</string>
+    <string name="key_underscore">_</string>
+    <string name="key_plus">+</string>
+
+    <!-- 行 3：Tab + 字母 + 反斜杠 -->
+    <string name="key_tab">tab</string>
+    <string name="key_q">q</string>
+    <string name="key_w">w</string>
+    <string name="key_e">e</string>
+    <string name="key_r">r</string>
+    <string name="key_t">t</string>
+    <string name="key_y">y</string>
+    <string name="key_u">u</string>
+    <string name="key_i">i</string>
+    <string name="key_o">o</string>
+    <string name="key_p">p</string>
+    <string name="key_lbracket">[</string>
+    <string name="key_rbracket">]</string>
+    <string name="key_backslash">\\</string>
+    <string name="key_lbrace">{</string>
+    <string name="key_rbrace">}</string>
+    <string name="key_pipe">|</string>
+
+    <!-- 行 4：Caps + 字母 + Enter -->
+    <string name="key_caps">caps</string>
+    <string name="key_a">a</string>
+    <string name="key_s">s</string>
+    <string name="key_d">d</string>
+    <string name="key_f">f</string>
+    <string name="key_g">g</string>
+    <string name="key_h">h</string>
+    <string name="key_j">j</string>
+    <string name="key_k">k</string>
+    <string name="key_l">l</string>
+    <string name="key_semicolon">;</string>
+    <string name="key_apostrophe">\'</string>
+    <string name="key_enter">return</string>
+    <string name="key_colon">:</string>
+    <string name="key_quote">\"</string>
+
+    <!-- 行 5：左右 Shift + 字母 -->
+    <string name="key_shift_l">shift</string>
+    <string name="key_shift_r">shift</string>
+    <string name="key_z">z</string>
+    <string name="key_x">x</string>
+    <string name="key_c">c</string>
+    <string name="key_v">v</string>
+    <string name="key_b">b</string>
+    <string name="key_n">n</string>
+    <string name="key_m">m</string>
+    <string name="key_comma">,</string>
+    <string name="key_period">.</string>
+    <string name="key_slash">/</string>
+    <string name="key_lt">&lt;</string>
+    <string name="key_gt">&gt;</string>
+    <string name="key_question">?</string>
+
+    <!-- 行 6：修改键 + 空格 + 修改键 + 方向键 -->
+    <string name="key_ctrl_l">control</string>
+    <string name="key_ctrl_r">control</string>
+    <string name="key_control_l">control</string>
+    <string name="key_control_r">control</string>
+    <string name="key_alt_l">alt</string>
+    <string name="key_alt_r">alt</string>
+    <string name="key_option_l">option</string>
+    <string name="key_option_r">option</string>
+    <string name="key_cmd_l">⌘</string>
+    <string name="key_cmd_r">⌘</string>
+    <string name="key_fn">fn</string>
+    <string name="key_globe">globe</string>
+    <string name="key_win">win</string>
+    <string name="key_space">space</string>
+    <string name="key_arrow_left">←</string>
+    <string name="key_arrow_up">↑</string>
+    <string name="key_arrow_down">↓</string>
+    <string name="key_arrow_right">→</string>
+
+    <!-- 媒体 / 系统图标无障碍描述 -->
+    <string name="cd_brightness_down">降低屏幕亮度</string>
+    <string name="cd_brightness_up">提高屏幕亮度</string>
+    <string name="cd_previous_track">上一首</string>
+    <string name="cd_play_pause">播放或暂停</string>
+    <string name="cd_next_track">下一首</string>
+    <string name="cd_mute">静音</string>
+    <string name="cd_volume_down">减小音量</string>
+    <string name="cd_volume_up">增大音量</string>
+    <string name="cd_stop">停止播放</string>
+    <string name="cd_eject">弹出</string>
+    <string name="cd_sleep">睡眠</string>
+    <string name="cd_power">电源</string>
+    <string name="cd_globe">地球键，切换输入法</string>
+    <string name="cd_win">Windows 键</string>
+
+    <!-- fn 组合键 HUD（屏幕中央 iOS 风格提示） -->
+    <string name="hud_brightness_100">亮度 100%</string>
+    <string name="hud_brightness_75">亮度 75%</string>
+    <string name="hud_brightness_50">亮度 50%</string>
+    <string name="hud_brightness_25">亮度 25%</string>
+    <string name="hud_brightness_min">亮度 最低</string>
+    <string name="hud_key_color_white">键帽颜色 白</string>
+    <string name="hud_key_color_orange">键帽颜色 橙</string>
+    <string name="hud_key_color_red">键帽颜色 红</string>
+    <string name="hud_text_size_small">字号 小</string>
+    <string name="hud_text_size_medium">字号 中</string>
+    <string name="hud_text_size_large">字号 大</string>
+    <string name="hud_haptic_off">震感 关</string>
+    <string name="hud_haptic_weak">震感 弱</string>
+    <string name="hud_haptic_medium">震感 中</string>
+    <string name="hud_haptic_strong">震感 强</string>
+
+    <!-- 触控板页 -->
+    <string name="trackpad_title">触控板</string>
+    <string name="trackpad_active_device_format">控制设备：%1$s（%2$s）</string>
+    <string name="trackpad_no_device">未选择控制设备</string>
+    <string name="trackpad_button_left">左键</string>
+    <string name="trackpad_button_right">右键</string>
+    <string name="trackpad_numpd_toggle">123</string>
+    <string name="cd_numpad_toggle">打开或收起数字小键盘</string>
+    <string name="numpad_title">数字小键盘</string>
+    <string name="numpad_done">完成</string>
+    <string name="cd_numpad_close">收起数字小键盘</string>
+
+    <!-- ============================================================
+         HID 后端（app/src/main/java/com/pocketkeyboard/app/hid/）
+         状态提示 / 配对提示 / 不可用原因，全部中文
+         ============================================================ -->
+
+    <!-- 不可用原因（HidStatusText.unavailableMessage） -->
+    <string name="hid_unavailable_bluetooth_unsupported">本机不支持蓝牙，无法作为键鼠外设。</string>
+    <string name="hid_unavailable_bluetooth_off">蓝牙尚未开启，请打开系统蓝牙后重试。</string>
+    <string name="hid_unavailable_android_too_old">当前系统版本过低（需 Android 9 及以上），无法使用 HID 外设功能。</string>
+    <string name="hid_unavailable_profile">系统未提供蓝牙 HID 外设能力（部分定制系统会禁用该功能），暂时无法连接。</string>
+    <string name="hid_unavailable_registration">HID 外设注册失败，可能有其他应用占用了该能力，请关闭后重试。</string>
+    <string name="hid_unavailable_permission">尚未获得蓝牙权限，请授予「附近的设备」权限后重试。</string>
+
+    <!-- 配对流程提示 -->
+    <string name="hid_pairing_step_title">配对步骤</string>
+    <string name="hid_pairing_step_1">1. 在需要控制的设备（iPad / iPhone / Mac / Windows）上打开蓝牙设置。</string>
+    <string name="hid_pairing_step_2">2. 在设备列表中选择「口袋键鼠」。</string>
+    <string name="hid_pairing_step_3">3. 若对端弹出数字，请与本机屏幕上显示的数字核对一致后确认；若对端要求输入配对码，请输入本机显示的 6 位数字。</string>
+    <string name="hid_pairing_step_4">4. 对端显示已连接后，点击下方按钮开始控制。</string>
+    <string name="hid_pairing_waiting">等待对端发起配对…</string>
+    <string name="hid_pairing_confirm_hint">系统弹出配对确认框时，请点击「配对」。</string>
+
+    <!-- 连接状态 -->
+    <string name="hid_status_connected">已连接 %1$s</string>
+    <string name="hid_status_disconnected">已断开 %1$s</string>
+    <string name="hid_status_reconnecting">正在重新连接 %1$s…</string>
+    <string name="hid_status_registered">已可作为蓝牙键鼠使用</string>
+    <string name="hid_status_unregistered">HID 外设未注册，按键与手势不会被发送</string>
+
+    <!-- ============================================================
+         五指挥势引擎（app/src/main/java/com/pocketkeyboard/app/gesture/）
+         HUD 文字提示 / 手势说明，全部中文
+         ============================================================ -->
+
+    <!-- HUD 提示（屏幕中央黑底半透明圆角、白字，1 秒后淡出） -->
+    <string name="hud_trackpad_mode">触控板模式</string>
+    <string name="hud_keyboard_mode">键盘模式</string>
+    <string name="hud_device_switched">已切换至 %1$s</string>
+    <string name="hud_no_paired_device">暂无已配对设备</string>
+
+    <!-- 手势说明（配对页底部提示） -->
+    <string name="gesture_hint_title">五指挥势</string>
+    <string name="gesture_hint_body">五指收缩进入触控板，五指张开回到键盘，五指整体左右滑动在已配对设备间循环切换。</string>
+    <string name="trackpad_gesture_hint">单指拖动移动指针，双指上下滑动滚动页面；五指收缩、张开与整体横滑由底层手势层接管。</string>
+    <string name="keyboard_gesture_hint">按键只响应单指；同时按下五指向内收缩可切换到触控板。</string>
+
+    <!-- ============================================================
+         数字小键盘（app/src/main/java/com/pocketkeyboard/app/trackpad/）
+         4 列 × 6 行：7 8 9 / · 4 5 6 × · 1 2 3 − · 0 00 . + ·
+         C % = 退格 · 回车（通栏）。键帽文案与键盘页同风格
+         ============================================================ -->
+
+    <!-- 数字与小数点（复用了键盘页的 key_0 … key_9） -->
+    <string name="key_kp_decimal">.</string>
+    <string name="key_kp_00">00</string>
+
+    <!-- 运算符 -->
+    <string name="key_kp_divide">÷</string>
+    <string name="key_kp_multiply">×</string>
+    <string name="key_kp_subtract">−</string>
+    <string name="key_kp_add">+</string>
+    <string name="key_kp_equal">=</string>
+    <string name="key_kp_percent">%</string>
+
+    <!-- 功能键 -->
+    <string name="key_kp_clear">C</string>
+    <string name="key_kp_backspace">⌫</string>
+
+    <!-- 数字小键盘无障碍描述 -->
+    <string name="cd_kp_clear">清空</string>
+    <string name="cd_kp_backspace">退格</string>
+    <string name="cd_kp_enter">回车</string>
+</resources>

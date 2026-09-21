@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 白色 K 字，几何笔画，全部位于自适应图标安全区（中心 66dp）内 -->
+    <!-- 竖笔画 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,32 L49,32 L49,76 L40,76 Z" />
+    <!-- 上斜笔 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M45.9,50.74 L52.1,57.26 L73.1,35.26 L66.9,28.74 Z" />
+    <!-- 下斜笔 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M45.61,56.96 L52.39,51.04 L73.39,73.04 L66.61,78.96 Z" />
+</vector>

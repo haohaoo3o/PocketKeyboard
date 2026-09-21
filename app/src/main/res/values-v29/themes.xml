@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- API 29+ 才支持关闭系统栏对比度 scrim：纯黑 edge-to-edge 下不想要半透明遮罩 -->
+    <style name="Theme.PocketKeyboard" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/pure_black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+    </style>
+</resources>

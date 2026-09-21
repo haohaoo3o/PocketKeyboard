@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 黑白极简主题：纯黑背景、纯白前景，深色状态栏。
+         windowLightNavigationBar 不显式设置：默认 false 即导航栏浅色图标，正符合纯黑背景；
+         两个 enforce*Contrast 属性需 API 29，见 values-v29/themes.xml 的同名覆写。 -->
+    <style name="Theme.PocketKeyboard" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/pure_black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
