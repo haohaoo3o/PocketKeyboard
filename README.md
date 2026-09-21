@@ -8,11 +8,11 @@
 
 ## 演示截图
 
-| 配对页 | 键盘页（87 键 TKL） |
+| 配对页 | 键盘页（竖屏融合布局） |
 | --- | --- |
 | ![配对页](docs/screenshots/01_pairing.png) | ![键盘页](docs/screenshots/02_keyboard.png) |
 
-| 触控板页 | 数字小键盘 |
+| 触控板页（横屏全屏） | 数字小键盘 |
 | --- | --- |
 | ![触控板页](docs/screenshots/03_trackpad.png) | ![数字小键盘](docs/screenshots/04_numpad.png) |
 
@@ -25,7 +25,10 @@
   - 五指收缩 → 切换到触控板模式
   - 五指张开 → 切换到键盘模式
   - 五指整体左右滑动 → 在已配对设备间循环切换控制目标
-- **87 键键盘页**：TKL 无小键盘区布局，苹果 / Windows 双套键位；黑底白字、键间无缝；按压有下陷视觉效果 + 触觉反馈
+- **竖屏融合布局**（键盘页 / 触控板页共用）：上半触控板（右上角「123」小键盘开关、底部短竖线分割的左右点击区、当前设备名）+ 下半 26 键手机输入法风格 QWERTY（三行字母 10/9/7 + shift / 退格 / 空格 / 回车，shift 轻点粘滞一次、按住组合大写）；键帽一律大写显示
+- **87 键键盘页**（横屏全屏）：TKL 无小键盘区布局，苹果 / Windows 双套键位；黑底白字、键间无缝；按压有下陷视觉效果 + 触觉反馈
+- **横屏全屏**：横屏下键盘模式铺满 87 键 TKL、触控板模式铺满触控板（manifest 声明 configChanges，旋转不重建 Activity）
+- **dock 自动隐藏**：底部模式切换栏在键盘 / 触控板页默认隐藏、把空间腾给键盘与触控板；单指从屏幕左缘或右缘向内滑过 24dp 即以苹果式 spring 唤出，切换页面模式后再次自动隐藏
 - **fn 组合功能**（fn 粘滞，顶部有提示）：
   - `fn + 空格`：循环调节屏幕背光亮度（iOS 风格亮度 HUD）
   - `fn + C`：循环切换键帽字体颜色（白 / 橙 / 红）
@@ -78,10 +81,10 @@ app/src/main/java/com/pocketkeyboard/app/
 ├── MainActivity.kt          # 唯一 Activity：权限申请、五指挥势层、页面容器
 ├── hid/                     # 蓝牙 HID 后端：HidDeviceTransport（系统 profile）+ NullHidTransport 兜底
 ├── gesture/                 # 五指挥势引擎、手势仲裁器（60ms 窗口）、HUD、页面转场
-├── keyboard/                # 87 键布局数据模型、无缝键帽、fn 组合功能、HID 报告引擎
+├── keyboard/                # 87 键 / 26 键布局数据模型、无缝键帽、fn 组合功能、竖屏融合页、HID 报告引擎
 ├── trackpad/                # 触控板手势、Win/Apple 手势集、数字小键盘 sheet
 └── ui/                      # MainViewModel、配对页、主题
-app/src/test/                # 159 个单元测试（布局/手势/HID 报文/Robolectric UI）
+app/src/test/                # 182 个单元测试（布局/手势/HID 报文/dock 策略/Robolectric UI）
 ```
 
 详见代码内注释与 [跨模块契约](app/src/main/java/com/pocketkeyboard/app/hid/HidTransport.kt)。

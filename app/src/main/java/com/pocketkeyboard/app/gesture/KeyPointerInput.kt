@@ -3,6 +3,8 @@ package com.pocketkeyboard.app.gesture
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 
@@ -72,32 +74,40 @@ class PocketKeyGestureHandler(
 fun Modifier.pocketKeyGestures(
     handler: PocketKeyGestureHandler,
     enabled: Boolean = true,
-): Modifier = this.then(
-    if (enabled) {
-        Modifier.pointerInput(handler) {
-            awaitEachGesture {
-                // requireUnconsumed = true：只接「没人要」的指针，保证多键和弦时每指只命中一个键
-                val down = awaitFirstDown(requireUnconsumed = true)
-                // 单指按下立刻消费，宣告这根手指归本按键
-                down.consume()
-                handler.onPress()
+): Modifier {
+    // rememberUpdatedState：pointerInput 的 key 固定为 Unit，handler 每次重组都变也不重启
+    // 手势协程——否则「按住一个键期间页面发生重组」（例如 DataStore 偏好首次回填、
+    // fn 状态变化）会取消正在进行的按下，onRelease 永远不会调用，键帽卡在按下态、
+    // 被控设备也卡在这个键上。回调始终通过 currentHandler 拿到最新实例。
+    // 与 Modifier.pocketGestures / Modifier.trackpadGestures 同一套写法。
+    val currentHandler by rememberUpdatedState(handler)
+    return this.then(
+        if (enabled) {
+            Modifier.pointerInput(Unit) {
+                awaitEachGesture {
+                    // requireUnconsumed = true：只接「没人要」的指针，保证多键和弦时每指只命中一个键
+                    val down = awaitFirstDown(requireUnconsumed = true)
+                    // 单指按下立刻消费，宣告这根手指归本按键
+                    down.consume()
+                    currentHandler.onPress()
 
-                var abandoned = false
-                while (true) {
-                    val event = awaitPointerEvent()
-                    // ① 按下指针数 ≥ 5：判定为五指挥势，放行给底层手势层
-                    if (event.changes.count { it.pressed } >= GestureConstants.REQUIRED_FINGER_COUNT) {
-                        abandoned = true
-                        break
+                    var abandoned = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        // ① 按下指针数 ≥ 5：判定为五指挥势，放行给底层手势层
+                        if (event.changes.count { it.pressed } >= GestureConstants.REQUIRED_FINGER_COUNT) {
+                            abandoned = true
+                            break
+                        }
+                        // ② 本指抬起：正常结束一次点击
+                        if (event.changes.none { it.id == down.id && it.pressed }) break
                     }
-                    // ② 本指抬起：正常结束一次点击
-                    if (event.changes.none { it.id == down.id && it.pressed }) break
-                }
 
-                if (abandoned) handler.onAbandoned() else handler.onRelease()
+                    if (abandoned) currentHandler.onAbandoned() else currentHandler.onRelease()
+                }
             }
-        }
-    } else {
-        Modifier
-    },
-)
+        } else {
+            Modifier
+        },
+    )
+}

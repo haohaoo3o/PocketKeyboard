@@ -1,16 +1,20 @@
 package com.pocketkeyboard.app
 
 import android.Manifest
+import android.content.pm.ActivityInfo
 import android.os.Build
-import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketkeyboard.app.ui.AppMode
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -22,6 +26,8 @@ import org.robolectric.Shadows.shadowOf
  * App 级 UI 冒烟测试（Robolectric + Compose，JVM 可复现）。
  *
  * 覆盖：冷启动不崩溃、三个页面可渲染可导航、小键盘开合、
+ * dock 自动隐藏 / 单指边缘内滑唤出 / 切模式后再次自动隐藏、
+ * 竖屏融合布局与横屏全屏 87 键两条布局分支，
  * 以及「未授予蓝牙权限不启动 HID / 授予后补启动」两条路径均不崩溃。
  */
 @RunWith(AndroidJUnit4::class)
@@ -38,27 +44,61 @@ class AppSmokeTest {
         // 配对页：CONTROL 按钮存在（未连接任何设备时为禁用态，但仍可渲染）
         composeRule.onNodeWithText("CONTROL").assertExists()
 
-        // 导航到键盘页：87 键布局真实组合出来（抽查 q / 1 / esc 键帽）
+        // 导航到键盘页：竖屏为融合布局（上半触控板 + 下半 26 键 QWERTY）
         composeRule.onNodeWithText("键盘").performClick()
         composeRule.waitForIdle()
-        composeRule.onAllNodesWithText("q").onFirst().assertExists()
-        composeRule.onAllNodesWithText("1").onFirst().assertExists()
-        composeRule.onAllNodesWithText("esc").onFirst().assertExists()
+        // 26 键键盘真实组合出来（字母标签一律大写显示）
+        composeRule.onAllNodesWithText("Q").onFirst().assertExists()
+        // 触控板区右上角「123」小键盘开关与设备名条
+        composeRule.onNodeWithContentDescription("打开或收起数字小键盘").assertExists()
+        composeRule.onNodeWithText("未选择控制设备").assertExists()
 
-        // 导航到触控板页：小键盘切换按钮存在，点击后进入小键盘、可再收起
+        // dock 在键盘页默认自动隐藏：三栏一个都不在
+        composeRule.onAllNodesWithText("键盘").assertCountEquals(0)
+        composeRule.onAllNodesWithText("触控板").assertCountEquals(0)
+        composeRule.onAllNodesWithText("配对").assertCountEquals(0)
+
+        // 单指从屏幕左缘向内滑过 24dp → dock 以苹果式 spring 滑入
+        swipeFromLeftEdgeToShowDock()
+        composeRule.onNodeWithText("触控板").assertExists()
+
+        // 通过 dock 切到触控板页：竖屏同样是融合布局；dock 再次自动隐藏
         composeRule.onNodeWithText("触控板").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithContentDescription("打开或收起数字小键盘").assertExists()
+        composeRule.onAllNodesWithText("键盘").assertCountEquals(0)
+        composeRule.onAllNodesWithText("触控板").assertCountEquals(0)
+        // 小键盘开合：点右上角开关 → sheet 出现 → 点「完成」收起
         composeRule.onNodeWithContentDescription("打开或收起数字小键盘").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("数字小键盘").assertExists()
         composeRule.onNodeWithText("完成").performClick()
         composeRule.waitForIdle()
 
-        // 回到配对页
+        // 再次边缘内滑唤出 dock，回到配对页（dock 常显）
+        swipeFromLeftEdgeToShowDock()
         composeRule.onNodeWithText("配对").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("CONTROL").assertExists()
+        // 配对页 dock 常显：无需边缘滑动
+        composeRule.onNodeWithText("触控板").assertExists()
+    }
+
+    /**
+     * 单指从屏幕左缘向内滑过 24dp：唤出 dock。
+     *
+     * 滑动手势从 x = 0（左缘）出发、水平向右 160px，越过
+     * [com.pocketkeyboard.app.EdgeSwipeGeometry] 的 24dp 激活带与触发距离。
+     */
+    private fun swipeFromLeftEdgeToShowDock() {
+        composeRule.onRoot().performTouchInput {
+            val y = centerY
+            swipe(
+                start = Offset(0f, y),
+                end = Offset(160f, y),
+                durationMillis = 200,
+            )
+        }
+        composeRule.waitForIdle()
     }
 
     @Test

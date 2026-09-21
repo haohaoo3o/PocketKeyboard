@@ -8,11 +8,11 @@ Pair it with an iPad / iPhone / Mac / Windows device and use your phone as their
 
 ## Screenshots
 
-| Pairing | Keyboard (87-key TKL) |
+| Pairing | Keyboard (portrait fused layout) |
 | --- | --- |
 | ![Pairing](docs/screenshots/01_pairing.png) | ![Keyboard](docs/screenshots/02_keyboard.png) |
 
-| Trackpad | Numeric Keypad |
+| Trackpad (landscape fullscreen) | Numeric Keypad |
 | --- | --- |
 | ![Trackpad](docs/screenshots/03_trackpad.png) | ![Keypad](docs/screenshots/04_numpad.png) |
 
@@ -25,7 +25,10 @@ Pair it with an iPad / iPhone / Mac / Windows device and use your phone as their
   - Pinch in → switch to trackpad mode
   - Pinch out → switch to keyboard mode
   - Swipe left/right with five fingers → cycle the active control target among paired hosts
-- **87-key keyboard**: TKL layout with Apple and Windows keymaps; black background, white text, seamless keys; press-down visual feedback plus haptics
+- **Portrait fused layout** (shared by keyboard and trackpad modes): trackpad on top (with the minimal "123" keypad toggle at the top-right, left/right click zones split by a short vertical line, and the active host name) plus a 26-key phone-style QWERTY on the bottom (three letter rows 10/9/7 + shift / backspace / space / return; tap shift for one-shot uppercase, hold it for combo capitals); keycaps always render letters uppercase
+- **87-key keyboard** (landscape fullscreen): TKL layout with Apple and Windows keymaps; black background, white text, seamless keys; press-down visual feedback plus haptics
+- **Landscape fullscreen**: in landscape the keyboard mode fills the screen with the 87-key TKL and the trackpad mode with the trackpad (configChanges in the manifest means no Activity recreation on rotation)
+- **Auto-hiding dock**: the bottom mode switcher hides by default on the keyboard/trackpad pages to free up space; a single-finger swipe inward from the left or right screen edge (more than 24dp) brings it back with an Apple-style spring, and it hides again as soon as the page mode changes
 - **fn combos** (sticky fn, with an on-screen hint):
   - `fn + Space`: cycle screen backlight brightness (iOS-style brightness HUD)
   - `fn + C`: cycle keycap text color (white / orange / red)
@@ -77,7 +80,7 @@ app/src/main/java/com/pocketkeyboard/app/
 ├── MainActivity.kt          # Single Activity: permissions, five-finger gesture layer, page container
 ├── hid/                     # Bluetooth HID backend: HidDeviceTransport (system profile) + NullHidTransport fallback
 ├── gesture/                 # Five-finger gesture engine, gesture arbiter (60ms window), HUD, page transitions
-├── keyboard/                # 87-key layout model, seamless keycaps, fn combos, HID report engine
+├── keyboard/                # 87-key / 26-key layout models, seamless keycaps, fn combos, portrait fused screen, HID report engine
 ├── trackpad/                # Trackpad gestures, Win/Apple gesture sets, numeric keypad sheet
 └── ui/                      # MainViewModel, pairing screen, theme
 app/src/test/                # 159 unit tests (layout/gesture/HID reports/Robolectric UI)

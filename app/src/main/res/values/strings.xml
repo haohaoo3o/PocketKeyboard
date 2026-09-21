@@ -109,16 +109,16 @@
 
     <!-- 行 3：Tab + 字母 + 反斜杠 -->
     <string name="key_tab">tab</string>
-    <string name="key_q">q</string>
-    <string name="key_w">w</string>
-    <string name="key_e">e</string>
-    <string name="key_r">r</string>
-    <string name="key_t">t</string>
-    <string name="key_y">y</string>
-    <string name="key_u">u</string>
-    <string name="key_i">i</string>
-    <string name="key_o">o</string>
-    <string name="key_p">p</string>
+    <string name="key_q">Q</string>
+    <string name="key_w">W</string>
+    <string name="key_e">E</string>
+    <string name="key_r">R</string>
+    <string name="key_t">T</string>
+    <string name="key_y">Y</string>
+    <string name="key_u">U</string>
+    <string name="key_i">I</string>
+    <string name="key_o">O</string>
+    <string name="key_p">P</string>
     <string name="key_lbracket">[</string>
     <string name="key_rbracket">]</string>
     <string name="key_backslash">\\</string>
@@ -128,15 +128,15 @@
 
     <!-- 行 4：Caps + 字母 + Enter -->
     <string name="key_caps">caps</string>
-    <string name="key_a">a</string>
-    <string name="key_s">s</string>
-    <string name="key_d">d</string>
-    <string name="key_f">f</string>
-    <string name="key_g">g</string>
-    <string name="key_h">h</string>
-    <string name="key_j">j</string>
-    <string name="key_k">k</string>
-    <string name="key_l">l</string>
+    <string name="key_a">A</string>
+    <string name="key_s">S</string>
+    <string name="key_d">D</string>
+    <string name="key_f">F</string>
+    <string name="key_g">G</string>
+    <string name="key_h">H</string>
+    <string name="key_j">J</string>
+    <string name="key_k">K</string>
+    <string name="key_l">L</string>
     <string name="key_semicolon">;</string>
     <string name="key_apostrophe">\'</string>
     <string name="key_enter">return</string>
@@ -146,13 +146,13 @@
     <!-- 行 5：左右 Shift + 字母 -->
     <string name="key_shift_l">shift</string>
     <string name="key_shift_r">shift</string>
-    <string name="key_z">z</string>
-    <string name="key_x">x</string>
-    <string name="key_c">c</string>
-    <string name="key_v">v</string>
-    <string name="key_b">b</string>
-    <string name="key_n">n</string>
-    <string name="key_m">m</string>
+    <string name="key_z">Z</string>
+    <string name="key_x">X</string>
+    <string name="key_c">C</string>
+    <string name="key_v">V</string>
+    <string name="key_b">B</string>
+    <string name="key_n">N</string>
+    <string name="key_m">M</string>
     <string name="key_comma">,</string>
     <string name="key_period">.</string>
     <string name="key_slash">/</string>

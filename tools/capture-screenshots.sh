@@ -7,12 +7,17 @@
 # 前置条件：
 #   1. 一台已开启 USB 调试的安卓手机通过 USB 连接（在手机上确认「允许调试」）
 #   2. 本机已安装 Android SDK platform-tools（adb）
-#   3. 已构建并安装最新 APK：./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk
+#   3. 已构建并安装最新 APK：./gradlew assembleRelease && adb install -r app/build/outputs/apk/release/app-release.apk
 #   4. 手机已解锁（本脚本只负责唤醒，滑动锁需提前解除）
+#   5. 蓝牙权限已授予。重装 APK 后 MIUI 会依次弹「位置 / 通知 / 蓝牙」权限框，
+#      需要先手动点掉（脚本里的 pm grant 对部分 MIUI 版本不生效）；
+#      脚本已尽量用 pm grant 预授，仍弹框时请按提示手动允许。
 #
 # 用法：
 #   tools/capture-screenshots.sh [设备序列号]
 # 不带参数时自动选择唯一连接的设备。
+#
+# 坐标按 1080x2400（密度 2.75）的小米手机校准；换机型请调整下面的常量。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -36,18 +41,35 @@ ACT="$PKG/.MainActivity"
 
 echo "==> 唤醒并启动 App"
 adb -s "$DEV" shell input keyevent 224 >/dev/null
+# 先固定到竖屏：设备可能停留在上次的横屏状态，dock 坐标会整体失效
+adb -s "$DEV" shell settings put system accelerometer_rotation 0
+adb -s "$DEV" shell settings put system user_rotation 0
+sleep 1
 adb -s "$DEV" shell am force-stop "$PKG"
+# 预授运行时权限（重装后 MIUI 可能仍会弹框，需手动点「始终允许」）
+for PERM in ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION BLUETOOTH_CONNECT \
+            BLUETOOTH_SCAN BLUETOOTH_ADVERTISE POST_NOTIFICATIONS; do
+  adb -s "$DEV" shell pm grant "$PKG" "android.permission.$PERM" >/dev/null 2>&1 || true
+done
 adb -s "$DEV" shell am start -n "$ACT" >/dev/null
-sleep 2
+sleep 3
 
-# 底部导航坐标（1080x2400 屏幕）：配对 / 键盘 / 触控板
+# 底部 dock 三项的中心坐标（1080x2400 竖屏）：配对 / 键盘 / 触控板
 NAV_PAIRING_X=180
 NAV_KEYBOARD_X=540
 NAV_TRACKPAD_X=900
 NAV_Y=2250
-# 触控板右上角「123」小键盘切换按钮中心（1080x2400 屏幕）
+# 横屏（2400x1080）下 dock 三项的中心坐标（横屏底栏更靠上、三项均分全宽）
+LAND_NAV_PAIRING_X=393
+LAND_NAV_KEYBOARD_X=1200
+LAND_NAV_TRACKPAD_X=2007
+LAND_NAV_Y=1014
+# 「123」小键盘开关中心（竖屏融合布局右上角，已避开状态栏）
 NUMPAD_BTN_X=959
-NUMPAD_BTN_Y=155
+NUMPAD_BTN_Y=170
+# 边缘内滑起点：x=5 在最左缘。MIUI 等手势导航系统会把它当成系统返回手势，
+# 由 App 的 BackHandler 接到「唤出 dock」上；原生 Android 上由边缘激活层直接识别。
+EDGE_SWIPE_X=5
 
 shot() { # shot <设备上的文件名> <本地文件名>
   adb -s "$DEV" shell screencap -p "/sdcard/$1"
@@ -56,28 +78,41 @@ shot() { # shot <设备上的文件名> <本地文件名>
   echo "  已保存 $OUT/$2"
 }
 
-echo "==> 1/4 配对页"
-adb -s "$DEV" shell input tap "$NAV_PAIRING_X" "$NAV_Y"
-sleep 2
+# 唤出 dock：dock 在键盘 / 触控板页默认自动隐藏，切换模式前必须先边缘内滑唤出。
+# 横屏时滑动起点纵坐标取半高（540），竖屏取半高（1200）。
+show_dock() { # show_dock <滑动起点纵坐标>
+  local Y="$1"
+  adb -s "$DEV" shell input swipe "$EDGE_SWIPE_X" "$Y" 400 "$Y" 250
+  sleep 1
+}
+
+echo "==> 1/4 配对页（dock 常显）"
 shot cap_pairing.png 01_pairing.png
 
-echo "==> 2/4 键盘页（87 键布局）"
+echo "==> 2/4 键盘页（竖屏融合布局：上半触控板 + 下半 26 键 QWERTY）"
 adb -s "$DEV" shell input tap "$NAV_KEYBOARD_X" "$NAV_Y"
 sleep 2
 shot cap_keyboard.png 02_keyboard.png
 
-echo "==> 3/4 触控板页"
-adb -s "$DEV" shell input tap "$NAV_TRACKPAD_X" "$NAV_Y"
+echo "==> 3/4 触控板页（横屏全屏触控板）"
+# 转到横屏（manifest 声明 configChanges，旋转不重建 Activity；自动旋转上面已关）
+adb -s "$DEV" shell settings put system user_rotation 1
+sleep 2
+show_dock 540
+adb -s "$DEV" shell input tap "$LAND_NAV_TRACKPAD_X" "$LAND_NAV_Y"
 sleep 2
 shot cap_trackpad.png 03_trackpad.png
 
-echo "==> 4/4 数字小键盘"
+echo "==> 4/4 数字小键盘（竖屏触控板页 + 123 sheet）"
+adb -s "$DEV" shell settings put system user_rotation 0
+sleep 2
 adb -s "$DEV" shell input tap "$NUMPAD_BTN_X" "$NUMPAD_BTN_Y"
 sleep 2
 shot cap_numpad.png 04_numpad.png
 
-echo "==> 收起小键盘，回到触控板页"
+echo "==> 收起小键盘，恢复自动旋转"
 adb -s "$DEV" shell input tap "$NUMPAD_BTN_X" "$NUMPAD_BTN_Y"
+adb -s "$DEV" shell settings put system accelerometer_rotation 1
 sleep 1
 
-echo "完成。若你的手机分辨率不是 1080x2400，请调整脚本顶部的坐标常量。"
+echo "完成。若你的手机分辨率不是 1080x2400，请调整脚本里的坐标常量。"
