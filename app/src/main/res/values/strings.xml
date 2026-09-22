@@ -36,11 +36,20 @@
     <string name="pairing_new_devices_empty">暂无新发现的设备</string>
     <!-- 已连接标识：HID registry 里已连接的 HID 对端（已配对 ≠ 已连接） -->
     <string name="pairing_device_connected">已连接</string>
+    <!-- 主动连接的行内状态流转（Bug A2：点击设备行 → 连接中… → 已连接 / 连接失败） -->
+    <string name="pairing_device_connecting">连接中…</string>
+    <string name="pairing_device_connect_failed">连接失败</string>
     <string name="pairing_device_platform_apple">苹果设备</string>
     <string name="pairing_device_platform_other">其他设备</string>
     <string name="pairing_device_active">当前控制目标</string>
     <string name="pairing_control">CONTROL</string>
     <string name="pairing_control_hint">请先在上方已配对设备中选择一个设备</string>
+    <!-- CONTROL 按钮下方的连接状态文案（症状 1：不让灰按钮成为唯一的状态信号） -->
+    <string name="pairing_control_status_none">请先在上方已配对设备中选择一个设备</string>
+    <string name="pairing_control_status_connected">已连接，可以开始控制</string>
+    <string name="pairing_control_status_connecting">正在连接，请稍候…</string>
+    <string name="pairing_control_status_failed">连接失败，点击设备行重试</string>
+    <string name="pairing_control_status_not_connected">尚未连接，点击设备行发起连接</string>
     <string name="pairing_platform_dialog_title">这是苹果设备还是其他设备？</string>
     <string name="pairing_platform_dialog_message">针对「%1$s」选择平台类型，选择后会记住，下次连接同一设备不再询问。</string>
     <string name="pairing_platform_dialog_cancel">取消</string>

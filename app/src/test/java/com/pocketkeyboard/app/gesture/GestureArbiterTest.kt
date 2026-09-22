@@ -53,6 +53,48 @@ class GestureArbiterTest {
         assertEquals(GestureOwner.FIVE_FINGER, withTimeout(1_000) { deferred.await() })
     }
 
+    /**
+     * B3 之后五指层可以**晚**表态：≥3 指起凑指窗口不再因位移提前放手，只受
+     * [GestureConstants.FINGER_GATHER_MAX_MS]（800ms）总上限约束——一次「慢慢张开」
+     * 的手势完全可能在第 5 根手指落下前等上大几百毫秒。仲裁器必须继续等，绝不能因为
+     * 等得久就把触摸判给触控板层（那正是「张开 / 收缩没反应」的仲裁层症状）。
+     */
+    @Test
+    fun `三指以上摆指期间晚到的接管仍然胜过安全超时`() = runBlocking {
+        val arbiter = GestureArbiter()
+
+        val deferred = async { arbiter.awaitDecision() }
+        // 凑指窗口总上限 800ms：第 5 根手指此刻才落下，五指层才表态
+        delay(GestureConstants.FINGER_GATHER_MAX_MS)
+        arbiter.claimFiveFinger()
+
+        assertEquals(
+            GestureOwner.FIVE_FINGER,
+            withTimeout(1_000) { deferred.await() },
+        )
+    }
+
+    /**
+     * 与之互补：五指层放手后触控板层必须**立刻**拿到裁决（1–2 指手势零延迟，
+     * 这正是 B3 保留「1–2 指位移即放手」的原因）。
+     */
+    @Test
+    fun `五指层放手时 awaitDecision 即刻返回触控板层`() = runBlocking {
+        val arbiter = GestureArbiter()
+
+        val elapsed = measureElapsedMillis {
+            runBlocking {
+                launch {
+                    delay(30)
+                    arbiter.releaseToTrackpad()
+                }
+                assertEquals(GestureOwner.TRACKPAD, withTimeout(1_000) { arbiter.awaitDecision() })
+            }
+        }
+
+        assertTrue("实际耗时 ${elapsed}ms，1–2 指触控板手势不该被凑指窗口拖住", elapsed in 10L..600L)
+    }
+
     @Test
     fun `五指层一放手 awaitDecision 立刻返回不等满超时`() = runBlocking {
         val arbiter = GestureArbiter()

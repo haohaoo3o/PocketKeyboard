@@ -29,12 +29,20 @@ import android.util.Log
  *            │     // 成功后回调 onAppStatusChanged(pluggedDevice, registered = true)
  *            └─ BondEventSource.start()              // ACTION_BOND_STATE_CHANGED / ACTION_PAIRING_REQUEST
  *
- * 对端发起连接（或我方 connect()）
- *  └─ Callback.onConnectionStateChanged(device, STATE_CONNECTED)
- *       └─ registry 更新 + statusListener.onHostConnected + 选定 activeDevice
+ * 连接状态（A1：只认系统真值）
+ *  └─ onConnectionStateChanged(device, STATE_CONNECTED)   // 系统回调：唯一真值通道
+ *        └─ registry 更新 + statusListener.onHostConnected + 选定 activeDevice
+ *  └─ refreshConnectedHosts()                        // 逐地址 getConnectionState() 兜底
+ *
+ * 主动连接（A2：设备侧发起 HID L2CAP）
+ *  └─ connectHost(address) → gateway.connect(address)
+ *        触发点：注册成功后自动连一次（plugged 线索 / preferredTarget）、
+ *        点设备行、发送时发现未连接、退避重试
  *
  * sendKeyboardReport/sendConsumerUsage/sendMouseMove/sendScroll/sendMouseButton
- *  └─ HidReportFactory 构造报告 → gateway.sendReport(activeDevice, reportId, data)
+ *  └─ HidReportFactory 构造报告 → sendToActive()
+ *        ├─ 已连接 → gateway.sendReport(activeDevice, reportId, data)  // 打印返回值
+ *        └─ 未连接 → 暂存状态型报告 + connectHost，连接成功后补发
  * ```
  *
  * ## 配对（SSP + 自动应答，Bug 2a）
@@ -57,6 +65,16 @@ import android.util.Log
  * - 所有 `sendXxx` 只发给 `registry.preferredTarget()`（默认当前 activeDevice）；
  * - 主机断开后按 [ReconnectPolicy] 指数退避重连；
  * - 五指左右滑切设备：调用 [cycleActiveDevice]。
+ *
+ * ## 连接状态判定（A1）与连接建立（A2）
+ * - **A1**：registry 的「已连接」只由系统真值驱动——`onConnectionStateChanged` 与
+ *   [refreshConnectedHosts] 里逐地址 `getConnectionState() == STATE_CONNECTED`。
+ *   `onAppStatusChanged` 的 plugged 设备（虚拟线缆已插上）在部分 ROM 上并不等于
+ *   profile 层已连接（`getConnectedDevices()` 空 + `getConnectionState()` = 0），
+ *   因此**不再**据此写 connected（那是假阳性），只用于自动选定控制目标与自动连接。
+ * - **A2**：连接必须主动发起（设备侧 `BluetoothHidDevice.connect`）：注册成功后
+ *   对 plugged / preferredTarget 连一次，点设备行、发送遇未连接、退避重试时同样
+ *   主动连；发送遇未连接时暂存状态型报告，连接成功后补发。
  *
  * ## 可测性
  * 构造参数全部是接口（[HidProfileGateway] / [BondEventSource] / [ReconnectScheduler]），
@@ -120,9 +138,47 @@ class HidDeviceTransport(
 
     private var started = false
     private var activeButtonMask = 0
+
+    /** 注册自愈：已尝试的恢复轮数（onAppStatusChanged 成功时清零）。 */
+    private var registrationAttempts = 0
+
+    /** 注册看门狗的取消句柄（回调到达即取消）。 */
+    private var registrationWatchdogCancel: (() -> Unit)? = null
     private val reconnectAttempts = HashMap<String, Int>()
     private var lastKeyboardReport: ByteArray = HidReportFactory.keyboardRelease()
     private var lastMouseReport: ByteArray = HidReportFactory.mouse(0, 0, 0, 0)
+
+    /**
+     * 因「目标未连接」而**暂存**的最近一次输入报告（Bug A2：连接建立后补发）。
+     *
+     * 只存状态型报告（键盘 / 鼠标，与 [lastKeyboardReport] / [lastMouseReport] 同一批），
+     * 它们被更新的概率高于一次性事件；每次新的暂存会覆盖上一份，因此补发的永远是
+     * 「最新的键鼠状态」而不是陈旧的按键。一次性事件（consumer 媒体键）不暂存——
+     * 延迟补发会造成多余的音量跳变，直接丢弃并记日志。
+     */
+    private var pendingReport: PendingReport? = null
+
+    /** [pendingReport] 的内容：目标地址 + 报告 ID + 数据。 */
+    private data class PendingReport(
+        val address: String,
+        val reportId: Int,
+        val data: ByteArray,
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is PendingReport) return false
+            return address.equals(other.address, ignoreCase = true) &&
+                reportId == other.reportId &&
+                data.contentEquals(other.data)
+        }
+
+        override fun hashCode(): Int {
+            var result = address.lowercase().hashCode()
+            result = 31 * result + reportId
+            result = 31 * result + data.contentHashCode()
+            return result
+        }
+    }
 
     // ============================================================ HidTransport
 
@@ -150,6 +206,7 @@ class HidDeviceTransport(
             reconnectAttempts.clear()
             registry.allEntries().forEach { registry.onDisconnected(it.address) }
             activeButtonMask = 0
+            pendingReport = null
             isAppRegistered = false
         }
         bondEventSource.stop()
@@ -234,9 +291,21 @@ class HidDeviceTransport(
     /** 主动连接某个已配对主机。 */
     fun connectHost(address: String) {
         synchronized(lock) {
+            if (registry.isConnected(address)) return
+            if (registry.entry(address)?.connectionState == HidHostRegistry.STATE_CONNECTING) {
+                // 已在下发连接中：不重复发起（重复 connect 会让状态机在
+                // CONNECTING → DISCONNECTED 之间来回跳），只让 UI 保持「连接中」
+                statusListener.onHostConnecting(address)
+                return
+            }
             registry.updateConnectionState(address, HidHostRegistry.STATE_CONNECTING)
-            if (!gateway.connect(address)) {
+            // UI 立刻显示「连接中…」；后续 connect 失败 / 成功都以此为准清理
+            statusListener.onHostConnecting(address)
+            val accepted = gateway.connect(address)
+            Log.i(TAG, "gateway.connect($address) = $accepted")
+            if (!accepted) {
                 registry.updateConnectionState(address, HidHostRegistry.STATE_DISCONNECTED)
+                statusListener.onHostConnectFailed(address)
                 scheduleReconnect(address)
             }
         }
@@ -249,6 +318,7 @@ class HidDeviceTransport(
             reconnectAttempts.remove(address)
             gateway.disconnect(address)
             registry.onDisconnected(address)
+            clearPendingReport(address)
             statusListener.onHostDisconnected(address)
         }
     }
@@ -269,6 +339,10 @@ class HidDeviceTransport(
 
     override fun onAppStatusChanged(pluggedDeviceAddress: String?, registered: Boolean) {
         Log.i(TAG, "onAppStatusChanged registered=$registered plugged=$pluggedDeviceAddress")
+        // 回调到达 = 注册流程有确定结果，看门狗退场；成功时自愈轮数清零
+        registrationWatchdogCancel?.invoke()
+        registrationWatchdogCancel = null
+        if (registered) registrationAttempts = 0
         synchronized(lock) {
             isAppRegistered = registered
             if (!registered) {
@@ -277,37 +351,56 @@ class HidDeviceTransport(
                 reconnectAttempts.clear()
                 registry.allEntries().forEach { registry.onDisconnected(it.address) }
                 activeButtonMask = 0
+                pendingReport = null
             }
         }
         statusListener.onAppRegistrationChanged(registered)
         if (registered) {
-            refreshBondedDevices()
-            refreshConnectedHosts()
+            // plugged 只是「虚拟线缆插着」的线索：部分 ROM（实测小米 + Android 13）
+            // 上 getConnectedDevices() 返回空、getConnectionState() 还是 DISCONNECTED，
+            // HID 连接并没有在 profile 层建立。Bug A1 起不再据此把 registry 写成
+            // STATE_CONNECTED（那是假阳性）；registry 的已连接只认系统真值——
+            // onConnectionStateChanged / refreshConnectedHosts 里逐地址
+            // getConnectionState()==STATE_CONNECTED。plugged 现在只用于两件事：
+            // 自动选定控制目标 + 自动发起连接（见下方 A2）。
             if (pluggedDeviceAddress != null) {
-                // Bug 2b：plugged 设备 = 「虚拟线缆已插上」= 有主机连着本外设。
-                // 必须显式登记为已连接：实测（小米 21091116UC + Android 13）
-                // `BluetoothHidDevice.getConnectedDevices()` 在 plugged 设备存在时仍返回
-                // 空列表，`onConnectionStateChanged` 也不会为存量连接补发事件，
-                // 只靠 refreshConnectedHosts() 会让 UI 的「已连接」永远不显示。
-                val becameConnected = synchronized(lock) {
-                    registry.updateConnectionState(
-                        pluggedDeviceAddress,
-                        HidHostRegistry.STATE_CONNECTED,
-                    )
+                synchronized(lock) {
+                    registry.update(pluggedDeviceAddress) { existing ->
+                        (existing ?: HidHostRegistry.Entry(pluggedDeviceAddress, null)).copy(
+                            platform = DevicePlatformDetector.detect(
+                                existing?.name,
+                                pluggedDeviceAddress,
+                            ),
+                        )
+                    }
                 }
-                val info = synchronized(lock) { registry.deviceInfo(pluggedDeviceAddress) }
-                if (becameConnected) info?.let { statusListener.onHostConnected(it) }
-                val activeBefore = synchronized(lock) { registry.activeAddress }
-                synchronized(lock) { registry.setActive(pluggedDeviceAddress) }
-                if (registryActiveAddress() != activeBefore) {
+                // 自动选定控制目标（不含任何「已连接」判定）；目标真的换了才通知 UI
+                if (synchronized(lock) { registry.setActive(pluggedDeviceAddress) }) {
                     statusListener.onActiveDeviceChanged(
                         synchronized(lock) { registry.deviceInfo(pluggedDeviceAddress) },
                     )
                 }
             }
+            refreshBondedDevices()
+            refreshConnectedHosts()
             publishConnectedHosts()
-            if (pluggedDeviceAddress == null) {
-                tryConnectPreferredTarget()
+            // A2：注册成功后主动发起一次连接——
+            // - 有 plugged 线索（虚拟线缆已插上）→ 连它；
+            // - 否则按 preferredTarget（已连上的主机 / 已选目标）。
+            // 已连接的直接确认为控制目标；未连接的 connectHost 一次，
+            // 失败由 reconnectScheduler 指数退避重试。
+            val autoConnectTarget = synchronized(lock) {
+                pluggedDeviceAddress?.takeIf { registry.entry(it) != null }
+                    ?: registry.preferredTarget()
+            }
+            if (autoConnectTarget != null) {
+                if (synchronized(lock) { registry.isConnected(autoConnectTarget) }) {
+                    statusListener.onActiveDeviceChanged(
+                        synchronized(lock) { registry.deviceInfo(autoConnectTarget) },
+                    )
+                } else {
+                    connectHost(autoConnectTarget)
+                }
             }
         } else {
             statusListener.onActiveDeviceChanged(null)
@@ -315,14 +408,12 @@ class HidDeviceTransport(
         }
     }
 
-    /** 读 registry 的当前控制目标（锁外调用点用）。 */
-    private fun registryActiveAddress(): String? = synchronized(lock) { registry.activeAddress }
-
     override fun onConnectionStateChanged(address: String, state: Int) {
         Log.i(TAG, "onConnectionStateChanged $address state=$state")
+        var becameConnected = false
         synchronized(lock) {
             val activeBefore = registry.activeAddress
-            val becameConnected = registry.updateConnectionState(address, state)
+            becameConnected = registry.updateConnectionState(address, state)
             val entry = registry.entry(address)
             registry.updatePlatform(address, DevicePlatformDetector.detect(entry?.name, address))
             val isBonded = entry?.isBonded == true
@@ -337,6 +428,8 @@ class HidDeviceTransport(
                 }
             } else if (isDisconnected) {
                 registry.onDisconnected(address)
+                // 连接已断：之前暂存的报告作废（避免连上别的设备时补发陈旧输入）
+                clearPendingReport(address)
             }
             val info = registry.deviceInfo(address)
             if (becameConnected) info?.let { statusListener.onHostConnected(it) }
@@ -349,6 +442,8 @@ class HidDeviceTransport(
             }
             if (isDisconnected && isBonded) scheduleReconnect(address)
         }
+        // 连接刚建立（系统真值）：把连接前暂存的报告补发出去（A2）
+        if (becameConnected) flushPendingReport(address)
         publishConnectedHosts()
     }
 
@@ -405,6 +500,7 @@ class HidDeviceTransport(
         synchronized(lock) {
             registry.onDisconnected(address)
             activeButtonMask = 0
+            clearPendingReport(address)
         }
         statusListener.onHostDisconnected(address)
         scheduleReconnect(address)
@@ -413,9 +509,18 @@ class HidDeviceTransport(
 
     // ============================================================ 内部实现
 
-    private fun onProfileReady() {
-        refreshBondedDevices()
-        bondEventSource.start(::onBondEvent)
+    /**
+     * 下发 registerApp 并启动「回调缺席」看门狗 + 自愈。
+     *
+     * 实测（小米 21091116UC / Android 13）两个 ROM 怪癖：
+     * 1) registerApp 返回 false 但注册实际成功——返回值不可信，真结果只看
+     *    onAppStatusChanged 回调；
+     * 2) App 死亡重启后的首次注册被服务端静默弹回（旧注册残留占用），此后
+     *    永远 rejected 且无回调，直到重启手机。
+     * 因此以「回调是否到达」为准；缺席则 unregisterApp() 清残留后重注册
+     * （最多 [REGISTRATION_MAX_RECOVERIES] 轮），全部失败才上报注册被拒。
+     */
+    private fun tryRegisterApp() {
         val sdp = HidSdpRecord(
             name = SDP_RECORD_NAME,
             description = SDP_RECORD_DESCRIPTION,
@@ -425,12 +530,39 @@ class HidDeviceTransport(
         )
         val qos = HidQosSettings.interactive()
         val accepted = gateway.registerApp(sdp, qos, qos, this)
-        if (!accepted) {
-            // 注意：registerApp 的返回值只代表「命令是否下发成功」，真正结果看
-            // onAppStatusChanged；返回 false 通常意味着代理未就绪或参数非法。
-            Log.w(TAG, "registerApp command rejected")
-            statusListener.onUnavailable(HidUnavailableReason.REGISTRATION_REJECTED)
+        Log.i(TAG, "registerApp dispatched (returned=$accepted attempt=${registrationAttempts + 1})")
+        registrationWatchdogCancel?.invoke()
+        registrationWatchdogCancel = reconnectScheduler.schedule(
+            REGISTRATION_WATCHDOG_KEY,
+            REGISTRATION_WATCHDOG_MS,
+        ) {
+            if (synchronized(lock) { isAppRegistered }) return@schedule
+            registrationAttempts += 1
+            if (registrationAttempts <= REGISTRATION_MAX_RECOVERIES) {
+                // 清掉服务端残留的旧注册（同一 UID 的 unregisterApp 才能释放）；
+                // 间隔要盖过服务端异步处理（太短会让迟到的 unregister 反杀新注册），
+                // 且重试前重建 profile 代理——旧 binder 连接可能已被残留状态拖死
+                Log.w(TAG, "registerApp 回调缺席，自愈第 $registrationAttempts 轮：unregisterApp + 重建代理 + 重注册")
+                gateway.unregisterApp()
+                reconnectScheduler.schedule(REGISTRATION_RETRY_KEY, REGISTRATION_RETRY_DELAY_MS) {
+                    if (synchronized(lock) { isAppRegistered }) return@schedule
+                    gateway.close()
+                    gateway.open(
+                        onReady = { tryRegisterApp() },
+                        onFailed = { reason -> statusListener.onUnavailable(reason) },
+                    )
+                }
+            } else {
+                Log.w(TAG, "registerApp 自愈 $REGISTRATION_MAX_RECOVERIES 轮仍无回调")
+                statusListener.onUnavailable(HidUnavailableReason.REGISTRATION_REJECTED)
+            }
         }
+    }
+
+    private fun onProfileReady() {
+        refreshBondedDevices()
+        bondEventSource.start(::onBondEvent)
+        tryRegisterApp()
     }
 
     private fun onBondEvent(event: BondEvent) {
@@ -476,6 +608,8 @@ class HidDeviceTransport(
                     reconnectScheduler.cancel(address)
                     reconnectAttempts.remove(address)
                     registry.onBondRemoved(address)
+                    // 设备已解除配对：它不可能再被连上，暂存的报告作废
+                    clearPendingReport(address)
                 }
                 statusListener.onPairedDevicesChanged(pairedDeviceInfos())
                 statusListener.onActiveDeviceChanged(activeDevice())
@@ -501,6 +635,7 @@ class HidDeviceTransport(
                 registry.allEntries().forEach { registry.onDisconnected(it.address) }
                 activeButtonMask = 0
                 isAppRegistered = false
+                pendingReport = null
             }
             statusListener.onAppRegistrationChanged(false)
             statusListener.onActiveDeviceChanged(null)
@@ -570,6 +705,8 @@ class HidDeviceTransport(
                     platform = DevicePlatformDetector.detect(host.name, host.address),
                 ),
             )
+            // 系统真值说它已连接：把连接前暂存的报告补发出去
+            flushPendingReport(host.address)
         }
         // 兜底查询：地址在锁内快照，IPC 放在锁外，避免长时间持锁
         val known = synchronized(lock) { registry.allEntries().map { it.address } }
@@ -584,20 +721,9 @@ class HidDeviceTransport(
                 if (becameConnected) {
                     val info = synchronized(lock) { registry.deviceInfo(address) }
                     info?.let { statusListener.onHostConnected(it) }
+                    // 系统真值说它已连接：把连接前暂存的报告补发出去
+                    flushPendingReport(address)
                 }
-            }
-        }
-        tryConnectPreferredTarget()
-    }
-
-    /** 没有活动目标时，挑一个已连接主机当目标。 */
-    private fun tryConnectPreferredTarget() {
-        synchronized(lock) {
-            val target = registry.preferredTarget() ?: return
-            if (registry.isConnected(target)) {
-                statusListener.onActiveDeviceChanged(registry.deviceInfo(target))
-            } else {
-                connectHost(target)
             }
         }
     }
@@ -623,6 +749,8 @@ class HidDeviceTransport(
                     val current = registry.entry(address)
                     if (current == null || current.isConnected) return@synchronized
                     statusListener.onReconnecting(address, attempt)
+                    // 退避重试也是「主动连接」：让 UI 持续显示「连接中…」
+                    statusListener.onHostConnecting(address)
                     if (!gateway.connect(address)) {
                         // connect 命令下发失败：继续退避重试
                         scheduleReconnect(address)
@@ -632,25 +760,80 @@ class HidDeviceTransport(
         }
     }
 
-    /** 发送到当前控制目标；没有目标 / 未连接时返回 false 并尝试补救。 */
-    private fun sendToActive(reportId: Int, data: ByteArray): Boolean {
-        val address = synchronized(lock) {
-            val target = registry.preferredTarget()
-            if (target == null) {
+    /**
+     * 发送到当前控制目标（A1/A2）。
+     *
+     * - 没有目标：通知 UI（目标为空），返回 false；
+     * - 目标未连接：**暂存本次报告**并发起主动连接（A2），连接成功后由
+     *   [flushPendingReport] 补发；一次性事件（consumer 媒体键）不暂存；
+     * - 已连接：直接 [HidProfileGateway.sendReport]，并**打印返回值**（A1：
+     *   之前静默丢弃返回值，真机上无法判断报告是否真的发出去了）。
+     */
+    internal fun sendToActive(reportId: Int, data: ByteArray): Boolean {
+        val target = synchronized(lock) {
+            val preferred = registry.preferredTarget()
+            if (preferred == null) {
                 statusListener.onActiveDeviceChanged(null)
                 return false
             }
-            if (!registry.isConnected(target)) {
-                null
-            } else {
-                target
+            if (registry.isConnected(preferred)) preferred else null
+        }
+        if (target == null) {
+            // 目标未连接：暂存 + 主动连接，本次不直接丢弃（A2）
+            val stash = synchronized(lock) {
+                val address = registry.preferredTarget() ?: return false
+                if (isStashableReport(reportId)) {
+                    pendingReport = PendingReport(address, reportId, data)
+                }
+                address
             }
-        } ?: run {
-            // 目标未连接：尝试连接，本次事件丢弃（UI 层应已提示）
-            synchronized(lock) { registry.activeAddress?.let { connectHost(it) } }
+            Log.i(TAG, "sendToActive: $stash 未连接，暂存 report=$reportId 并主动连接")
+            connectHost(stash)
             return false
         }
-        return gateway.sendReport(address, reportId, data)
+        val accepted = gateway.sendReport(target, reportId, data)
+        // A1：sendReport 的返回值此前被静默丢弃——它是「命令是否下发成功」的唯一信号，
+        // 连接半开 / 对端已断时返回 false，不打印就无法在 logcat 里定位「按键没反应」
+        Log.i(TAG, "gateway.sendReport($target, report=$reportId, size=${data.size}) = $accepted")
+        return accepted
+    }
+
+    /** 状态型报告（键盘 / 鼠标）可暂存补发；一次性事件（媒体键）不暂存。 */
+    private fun isStashableReport(reportId: Int): Boolean =
+        reportId == HidReportFactory.REPORT_ID_KEYBOARD ||
+            reportId == HidReportFactory.REPORT_ID_MOUSE ||
+            reportId == HidReportFactory.REPORT_ID_MOUSE_PAN
+
+    /**
+     * 连接建立后补发暂存的报告（A2）。
+     *
+     * 在 [onConnectionStateChanged]（系统回调）与 [refreshConnectedHosts]
+     * （逐地址 getConnectionState 兜底）两条真值通道上都会调用；补发的是
+     * **最新**的键鼠状态快照，不是陈旧的单次按键。
+     */
+    private fun flushPendingReport(address: String) {
+        val pending = synchronized(lock) {
+            val report = pendingReport
+            if (report == null ||
+                !report.address.equals(address, ignoreCase = true) ||
+                !registry.isConnected(address)
+            ) {
+                return
+            }
+            pendingReport = null
+            report
+        }
+        Log.i(TAG, "flushPendingReport → $address report=${pending.reportId}")
+        gateway.sendReport(address, pending.reportId, pending.data)
+    }
+
+    /** 作废某个地址的暂存报告（断开 / 解除配对 / 注销时调用）。 */
+    private fun clearPendingReport(address: String) {
+        synchronized(lock) {
+            if (pendingReport?.address.equals(address, ignoreCase = true)) {
+                pendingReport = null
+            }
+        }
     }
 
     /** 已配对设备列表（bonded 或已连接）。 */
@@ -674,6 +857,21 @@ class HidDeviceTransport(
 
         /** SDP 提供方。 */
         const val SDP_RECORD_PROVIDER = "口袋键鼠"
+        /** 注册看门狗：回调缺席判定窗口（ms）。 */
+        private const val REGISTRATION_WATCHDOG_MS = 2_000L
+
+        /** 自愈重注册前的静默间隔（ms）。 */
+        private const val REGISTRATION_RETRY_DELAY_MS = 2_000L
+
+        /** 自愈最大轮数。 */
+        private const val REGISTRATION_MAX_RECOVERIES = 3
+
+        /** reconnectScheduler 的看门狗键。 */
+        private const val REGISTRATION_WATCHDOG_KEY = "#registration-watchdog"
+
+        /** reconnectScheduler 的重注册键。 */
+        private const val REGISTRATION_RETRY_KEY = "#registration-retry"
+
     }
 }
 

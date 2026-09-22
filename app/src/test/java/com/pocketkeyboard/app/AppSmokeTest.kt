@@ -47,10 +47,11 @@ class AppSmokeTest {
         // 导航到键盘页：竖屏为融合布局（上半触控板 + 中部系统输入法唤起区 + 底部修饰键排）
         composeRule.onNodeWithText("键盘").performClick()
         composeRule.waitForIdle()
-        // 系统输入法唤起区的提示与无障碍描述真实组合出来
-        composeRule.onNodeWithText("点此唤起系统键盘").assertExists()
+        // B4：键盘模式（KEYBOARD）自动聚焦并弹出系统输入法，因此未聚焦时才显示的
+        // 「点此唤起系统键盘」提示不出现；输入区本身（无障碍描述）照常组合出来
         composeRule.onNodeWithContentDescription("文本输入区，点此弹出系统键盘，输入内容会发送到被控设备")
             .assertExists()
+        composeRule.onAllNodesWithText("点此唤起系统键盘").assertCountEquals(0)
         // 修饰键排：ctrl / shift / fn / win / alt / tab / esc 七颗键（Windows 平台标签）
         composeRule.onNodeWithContentDescription("ctrl").assertExists()
         composeRule.onNodeWithContentDescription("shift").assertExists()
@@ -72,9 +73,11 @@ class AppSmokeTest {
         swipeFromLeftEdgeToShowDock()
         composeRule.onNodeWithText("触控板").assertExists()
 
-        // 通过 dock 切到触控板页：竖屏同样是融合布局；dock 再次自动隐藏
+        // 通过 dock 切到触控板页：竖屏同样是融合布局；dock 再次自动隐藏。
+        // B4：触控板模式收起系统输入法 → 未聚焦提示回归（与键盘模式视觉可区分）
         composeRule.onNodeWithText("触控板").performClick()
         composeRule.waitForIdle()
+        composeRule.onNodeWithText("点此唤起系统键盘").assertExists()
         composeRule.onAllNodesWithText("键盘").assertCountEquals(0)
         composeRule.onAllNodesWithText("触控板").assertCountEquals(0)
         // 小键盘开合：点右上角开关 → sheet 出现 → 点「完成」收起

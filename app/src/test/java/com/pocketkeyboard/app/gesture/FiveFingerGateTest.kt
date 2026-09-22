@@ -1,15 +1,18 @@
 package com.pocketkeyboard.app.gesture
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 五指挥意图闸门的单测（问题 3a / 3b 的 UI 联动）。
+ * 五指挥意图闸门的单测（问题 3a / 3b 的 UI 联动 + 第三轮按键层作废判定）。
  *
  * 闸门是手势协程（`pointerInput`）与 Compose UI 之间唯一的传话通道：
  * 手势层在凑指窗口里看到 ≥[GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT] 指就置位，
- * UI 层据此收起系统输入法 / 拒绝聚焦弹键盘；一次手势结束（所有手指抬起）后复位。
+ * UI 层据此收起系统输入法 / 拒绝聚焦弹键盘；按键层（`Modifier.pocketKeyGestures`）
+ * 据此把落在键帽上的按下整体作废——兄弟按键节点互相看不见对方的指针，闸门是它们
+ * 唯一的「全局真值」；一次手势结束（所有手指抬起）后复位。
  */
 /**
  * 注意：本测试**不加** `@RunWith(AndroidJUnit4::class)` / `@Config`——`FiveFingerGate`
@@ -54,5 +57,47 @@ class FiveFingerGateTest {
         assertTrue(gate.shouldYieldToFiveFinger)
         gate.reset()
         assertFalse("所有手指抬起后必须复位，否则下一轮手势一直处于让位态", gate.shouldYieldToFiveFinger)
+    }
+
+    // ---------------------------------------------- intentDetected（按键层作废判据）
+
+    @Test
+    fun `初始没有五指挥势意图`() {
+        assertFalse(gate.intentDetected)
+        assertEquals(0, gate.pendingFingers)
+    }
+
+    @Test
+    fun `两指不构成意图三指才构成`() {
+        gate.observeGather(fingerCount = 2, claimed = false)
+        assertFalse("双指是触控板常规手势，按键不该被作废", gate.intentDetected)
+        gate.observeGather(fingerCount = 3, claimed = false)
+        assertTrue(gate.intentDetected)
+    }
+
+    @Test
+    fun `五指层接管时同样构成意图`() {
+        // claimed 但手指数回退到 2：按键层仍然要作废（判据是 claimed || 意图）
+        gate.observeGather(fingerCount = 5, claimed = true)
+        assertTrue(gate.intentDetected)
+    }
+
+    @Test
+    fun `pendingFingers 记住窗口内见证过的最多手指数`() {
+        // 手指数回调式下降不能把已经置位的意图撤掉，否则输入法会被重新弹出来、
+        // 已经作废的按键也会被重新激活
+        gate.observeGather(fingerCount = 4, claimed = false)
+        gate.observeGather(fingerCount = 2, claimed = false)
+        assertEquals(4, gate.pendingFingers)
+        assertTrue(gate.intentDetected)
+    }
+
+    @Test
+    fun `复位后意图与手指数一起清空`() {
+        gate.observeGather(fingerCount = 3, claimed = true)
+        gate.reset()
+        assertFalse(gate.intentDetected)
+        assertEquals(0, gate.pendingFingers)
+        assertFalse(gate.claimed)
     }
 }

@@ -57,10 +57,21 @@ class FiveFingerGate {
      * UI 层唯一需要读的判据：是否应当让位给五指挥势。
      *
      * - `claimed`：5 指已凑齐，手势必然归五指层，此刻收起键盘 / 停止激活都不会误伤；
-     * - `pendingFingers >= FIVE_FINGER_INTENT_FINGER_COUNT`：还在凑，但意图明确。
+     * - `intentDetected`：还在凑，但意图明确。
      */
     val shouldYieldToFiveFinger: Boolean
-        get() = claimed || pendingFingers >= GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT
+        get() = claimed || intentDetected
+
+    /**
+     * 凑指窗口内是否已观察到「有五指挥势意图」的手指数
+     * （≥ [GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT]）。
+     *
+     * 按键层（`Modifier.pocketKeyGestures`）用它做「作废」判定：兄弟按键节点互相看不见
+     * 对方的指针，5 根手指分别落在 5 个不同键帽上时每颗键的本地计数永远是 1，
+     * 只有这份全局计数能认出这是五指挥势（详见 KeyPointerInput 的「兄弟盲区」小节）。
+     */
+    val intentDetected: Boolean
+        get() = pendingFingers >= GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT
 
     /**
      * 手势层调用：汇报凑指窗口内的最新手指数。

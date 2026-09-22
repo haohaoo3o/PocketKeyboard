@@ -37,7 +37,12 @@ class MainViewModelStatusBridge(
 
     override fun onAppRegistrationChanged(registered: Boolean) {
         // MainViewModel 契约里没有单独的注册状态字段，注册结果通过设备列表 /
-        // 不可用原因间接体现；这里只做日志用途的保留钩子。
+        // 不可用原因间接体现；注册成功后清掉旧的不可用提示（badge 只反映当前状态）。
+        if (registered) {
+            _unavailableReason.value = null
+            viewModel.setConnectingDeviceAddress(null)
+            viewModel.setConnectFailedAddress(null)
+        }
     }
 
     override fun onPairedDevicesChanged(devices: List<HidDeviceInfo>) {
@@ -61,11 +66,40 @@ class MainViewModelStatusBridge(
             val next = viewModel.pairedDevices.value.firstOrNull { it.address != address }
             viewModel.setActiveDevice(next)
         }
+        // 连接尝试随之中断：清掉「连接中 / 连接失败」的行内提示，交给退避重试重新发起
+        if (viewModel.connectingDeviceAddress.value == address) {
+            viewModel.setConnectingDeviceAddress(null)
+        }
+        if (viewModel.connectFailedAddress.value == address) {
+            viewModel.setConnectFailedAddress(null)
+        }
+    }
+
+    override fun onHostConnecting(address: String) {
+        // 新一轮主动连接开始：清掉上一次失败提示，进入「连接中」
+        viewModel.setConnectFailedAddress(null)
+        viewModel.setConnectingDeviceAddress(address)
+    }
+
+    override fun onHostConnectFailed(address: String) {
+        // 命令没下发成功（UI 需要可见反馈）；底层仍会退避重试，
+        // 下次重试经 onHostConnecting 重新进入「连接中」
+        if (viewModel.connectingDeviceAddress.value == address) {
+            viewModel.setConnectingDeviceAddress(null)
+        }
+        viewModel.setConnectFailedAddress(address)
     }
 
     override fun onConnectedDevicesChanged(addresses: Set<String>) {
         // Bug 2b：registry 里已连接的 HID 对端，配对页据此显示「已连接」标识
         viewModel.setConnectedDeviceAddresses(addresses)
+        // 系统真值说已连接：对应的「连接中 / 连接失败」提示该退场了
+        viewModel.connectingDeviceAddress.value
+            ?.takeIf { it in addresses }
+            ?.let { viewModel.setConnectingDeviceAddress(null) }
+        viewModel.connectFailedAddress.value
+            ?.takeIf { it in addresses }
+            ?.let { viewModel.setConnectFailedAddress(null) }
     }
 
     override fun onActiveDeviceChanged(device: HidDeviceInfo?) {

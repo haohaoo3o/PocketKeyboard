@@ -10,7 +10,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
@@ -157,11 +156,29 @@ fun Modifier.pocketGestures(
  * - 每有新手指落下 → 截止时间续期到「该手指落下 + [GestureConstants.FINGER_GATHER_RENEW_MS]」；
  * - 总截止不晚于「第一根手指落下 + [GestureConstants.FINGER_GATHER_MAX_MS]」；
  * - 已按下的手指位移超过 [GestureConstants.FINGER_GATHER_MOVE_SLOP] 且没有新手指继续落下
- *   → **立刻**放手（这是触控板手势正在进行，不是摆指）；
+ *   → **立刻**放手（这是触控板手势正在进行，不是摆指）。见下一小节：这条只对 1–2 指生效；
  * - 所有手指都抬起 → **立刻**放手（手势在窗口内就结束了）。
  *
  * 于是五指手势有充足的凑指时间，而单指 / 双指触控板操作几乎感觉不到等待：
  * 「按下即拖动」的手指一动过阈值，五指层在同一批事件里就放手了。
+ *
+ * ## 位移放手只适用于 1–2 指（真机实测第三轮，张开 / 收缩不灵的主根因）
+ *
+ * 「位移超过 [GestureConstants.FINGER_GATHER_MOVE_SLOP] 就放手」对**张开 / 捏合**是错杀：
+ * 用户做一次张开，手指本来就是**边落边张开**的——第 3、第 4 根落下的同时，先落下那几根正在
+ * 向外扩，位移分分钟超过 slop。一旦 ≥3 指就据此放手，症状就是「触控板页做张开 / 收缩没反应」
+ * （手指一分开，五指层已经把触摸交还给触控板层，跟踪阶段根本进不去）。
+ *
+ * 3 指即「有五指挥势意图」（[GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT]），
+ * 意图已确立，于是规则改为：
+ *
+ * - **按下指数 ≤ 2** + 没有新手指落下 + 已按下手指位移超阈值 → 立刻放手。1–2 指是明确的
+ *   单指 / 双指触控板手势（拖动 / 滚动 / 缩放），这条规则保证它们零延迟；
+ * - **≥ 3 指**（意图已确立）→ 不再因位移放手，只受**总窗口上限**
+ *   [GestureConstants.FINGER_GATHER_MAX_MS] 约束（到期仍不足 5 指才放手）。
+ *
+ * 判定逻辑抽在纯函数 [FingerGatherState] 里（JVM 单测可逐条跑），本函数只负责
+ * 「等事件 + 掐时间 + 把结论翻译成回调」。
  *
  * ## 为什么真机上还是不灵（第二轮实测后补记）
  *
@@ -327,23 +344,172 @@ private class GatheredFingers(
 )
 
 /**
+ * 凑指窗口观察到的一根手指（纯数据，由 `PointerInputChange` 映射而来）。
+ *
+ * 用 `pointerId: Long` 而不是 Compose 的 `PointerId`：判定状态机是纯 Kotlin，
+ * 单测里直接造即可，不需要 Compose 的指针体系。
+ */
+internal data class GatherFinger(
+    val pointerId: Long,
+    val x: Float,
+    val y: Float,
+    val uptimeMillis: Long,
+)
+
+/** 凑指窗口放手的原因（写进 logcat 结论行，真机排查用）。 */
+internal enum class GatherReleaseReason {
+    /** 窗口内所有手指都抬起了。 */
+    ALL_FINGERS_UP,
+
+    /** 1–2 指按下、没有新手指落下且已按下手指位移超阈值（触控板手势正在进行）。 */
+    FINGERS_MOVING,
+
+    /** 窗口到期（续期 / 总上限）仍不足 5 指。 */
+    WINDOW_EXPIRED,
+}
+
+/** 凑指窗口对一次观察给出的结论。 */
+internal sealed interface GatherVerdict {
+
+    /** 凑满 [GestureConstants.REQUIRED_FINGER_COUNT] 指：进入跟踪阶段。 */
+    data class Gathered(val fingerCount: Int) : GatherVerdict
+
+    /**
+     * 继续等：下一个事件 / [deadlineUptime] 到期前还没凑满就放弃。
+     *
+     * @param deadlineUptime 本轮的截止时刻（MotionEvent uptime 体系，ms）
+     * @param intentEstablished 是否已达到「五指挥势意图」手指数（≥3 指）——
+     *    调用方据此收起系统输入法、让按键层停止激活
+     * @param newFingerArrived 本次观察里是否有新手指落下（续期 + 日志用）
+     * @param fingerCount 当前按下指数
+     */
+    data class Waiting(
+        val deadlineUptime: Long,
+        val intentEstablished: Boolean,
+        val newFingerArrived: Boolean,
+        val fingerCount: Int,
+    ) : GatherVerdict
+
+    /** 明确不是五指挥势：交还给触控板层。 */
+    data class Release(val reason: GatherReleaseReason) : GatherVerdict
+}
+
+/**
+ * 凑指窗口的判定状态机（纯 Kotlin，JVM 单测可逐条跑）。
+ *
+ * 规则详见 [detectPocketGestures] 的「凑指窗口为什么是滑动的 / 位移放手只适用于 1–2 指」
+ * 两节。两条关键取舍：
+ *
+ * 1. **位移基准每来一根新手指就整体重设**：慢慢把 5 根手指摆开时，先落下的那几根有轻微
+ *    漂移是正常摆位，不算「拖动」；
+ * 2. **≥ [GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT] 指后不再因位移放手**：
+ *    张开 / 捏合本来就是「边落边扩」，3 指起只受总窗口上限约束。
+ *
+ * 状态机不读系统时钟：时间由调用方以 `nowUptime`（事件 uptime）喂进来，因此测试里
+ * 可以用任意时间序列驱动。
+ *
+ * @param firstDownUptime 第一根手指落下的时刻
+ * @param firstFrame 第一根手指所在事件里已按下的手指（同一帧可能打包了多根 down）
+ * @param moveSlopPx 「明显在动」的位移阈值（px）
+ * @param renewMs 每根新手指的续期步长
+ * @param maxMs 总窗口上限（自第一根手指起算）
+ * @param requiredFingerCount 凑满几指算五指挥势
+ * @param intentFingerCount 几指起算「有五指挥势意图」
+ */
+internal class FingerGatherState(
+    firstDownUptime: Long,
+    firstFrame: List<GatherFinger>,
+    private val moveSlopPx: Float,
+    private val renewMs: Long = GestureConstants.FINGER_GATHER_RENEW_MS,
+    private val maxMs: Long = GestureConstants.FINGER_GATHER_MAX_MS,
+    private val requiredFingerCount: Int = GestureConstants.REQUIRED_FINGER_COUNT,
+    private val intentFingerCount: Int = GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT,
+) {
+    private val hardDeadline: Long = firstDownUptime + maxMs
+
+    /** 位移基准：[pointerId] → 落下位置。每来一根新手指就整体重设。 */
+    private var baseline: Map<Long, Offset> =
+        firstFrame.associate { it.pointerId to Offset(it.x, it.y) }
+
+    /** 最近一根新手指落下的时刻（续期基准）。 */
+    private var lastNewFingerUptime: Long = firstDownUptime
+
+    /** 是否已达到「五指挥势意图」手指数（一旦确立不再撤销，直到一次手势结束复位）。 */
+    var intentEstablished: Boolean = false
+        private set
+
+    /**
+     * 喂入一次观察。
+     *
+     * @param pressed 当前按下的手指（位置是**当前**位置）
+     * @param nowUptime 本次观察对应的时刻（本批事件里的最新 uptime）
+     */
+    fun observe(pressed: List<GatherFinger>, nowUptime: Long): GatherVerdict {
+        if (pressed.isEmpty()) {
+            // 手势在窗口内就结束了：立刻放手，否则触控板层等不到裁决、这次轻点会丢
+            return GatherVerdict.Release(GatherReleaseReason.ALL_FINGERS_UP)
+        }
+        if (pressed.size >= requiredFingerCount) {
+            return GatherVerdict.Gathered(pressed.size)
+        }
+
+        val newFingerArrived = pressed.any { !baseline.containsKey(it.pointerId) }
+        if (pressed.size >= intentFingerCount) intentEstablished = true
+
+        if (newFingerArrived) {
+            // 有新手指落下：续期 + 重设位移基准
+            baseline = pressed.associate { it.pointerId to Offset(it.x, it.y) }
+            lastNewFingerUptime = nowUptime
+        } else if (!intentEstablished && fingersMovedBeyondSlop(pressed)) {
+            // 没有新手指、而已按下的手指明显在动 → 这是正在进行的触控板手势。
+            // 仅 1–2 指：≥3 指时意图已确立（张开 / 捏合就是边落边扩），不再据此放手
+            return GatherVerdict.Release(GatherReleaseReason.FINGERS_MOVING)
+        }
+
+        // 意图已确立后只受总窗口上限约束（续期窗口不再宽限）；否则取两者较早者
+        val deadline = if (intentEstablished) {
+            hardDeadline
+        } else {
+            minOf(lastNewFingerUptime + renewMs, hardDeadline)
+        }
+        if (nowUptime >= deadline) {
+            return GatherVerdict.Release(GatherReleaseReason.WINDOW_EXPIRED)
+        }
+        return GatherVerdict.Waiting(
+            deadlineUptime = deadline,
+            intentEstablished = intentEstablished,
+            newFingerArrived = newFingerArrived,
+            fingerCount = pressed.size,
+        )
+    }
+
+    /** 已按下的手指里，有没有哪根相对基准位置的位移超过 [moveSlopPx]。 */
+    private fun fingersMovedBeyondSlop(pressed: List<GatherFinger>): Boolean =
+        pressed.any { finger ->
+            val from = baseline[finger.pointerId] ?: return@any false
+            fingerTravel(Offset(finger.x, finger.y), from) > moveSlopPx
+        }
+}
+
+/**
  * 在滑动凑指窗口内等待凑满 [GestureConstants.REQUIRED_FINGER_COUNT] 指。
  *
  * 窗口规则（详见 [detectPocketGestures] 的说明）：
  * - 每有新手指落下 → 截止时间续期到「该手指落下 + [GestureConstants.FINGER_GATHER_RENEW_MS]」；
  * - 总截止不晚于「第一根手指落下 + [GestureConstants.FINGER_GATHER_MAX_MS]」；
- * - 没有新手指、而已按下手指的位移超过 [gatherSlopPx] → 立刻返回 null（触控板手势正在进行）；
- * - 所有手指都抬起 → 立刻返回 null（手势在窗口内就结束了，也必须让触控板层收到裁决）。
+ * - **1–2 指**按下、没有新手指、而已按下手指位移超过 [gatherSlopPx] → 立刻返回 null
+ *   （触控板手势正在进行）；≥3 指（意图已确立）不再因位移放手；
+ * - 所有手指都抬起 → 立刻返回 null（手势在窗口内就结束，也必须让触控板层收到裁决）。
  *
- * 位移基准（[PointerId] → 落点）每来一根新手指就整体重设一次：慢慢把 5 根手指摆开时，
- * 先落下的那几根有轻微漂移是正常的摆位，不算「拖动」，不会误触发放手。
+ * 判定全部在 [FingerGatherState] 里（纯函数，单测覆盖）；本函数只负责等事件、掐时间，
+ * 以及把「意图已确立」翻译成 [PocketGestureHandler.onIntent] / [FiveFingerGate.observeGather]。
  *
  * ## 与系统输入法的联动
  *
- * 每观察到一根新手指，就通过 [handler] 的 [PocketGestureHandler.onIntent] 把当前手指数
- * 报出去（同时写进 [gate]）。竖屏融合页据此**主动收起系统输入法**：否则落在 IME 窗口
- * 上的手指到不了本层，5 指永远凑不齐（真机实测的主因）。阈值见
- * [GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT]。
+ * 一观察到五指挥势意图（≥ [GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT] 指），就通过
+ * [handler] 的 [PocketGestureHandler.onIntent] 把当前手指数报出去（同时写进 [gate]）。
+ * 竖屏融合页据此**主动收起系统输入法**：否则落在 IME 窗口上的手指到不了本层，
+ * 5 指永远凑不齐（真机实测的主因）。
  *
  * @return 凑满那一刻的 [PointerEvent]；明确凑不齐则返回 null。
  */
@@ -353,76 +519,88 @@ private suspend fun AwaitPointerEventScope.awaitFiveFingersGathered(
     handler: () -> PocketGestureHandler,
     gate: () -> FiveFingerGate?,
 ): GatheredFingers? {
-    val firstDownUptime = firstDown.change.uptimeMillis
-    val hardDeadline = firstDownUptime + GestureConstants.FINGER_GATHER_MAX_MS
-    // 基准位置：每来一根新手指就重设（见函数注释）
-    var baseline: Map<PointerId, Offset> =
-        firstDown.event.changes.filter { it.pressed }.associate { it.id to it.position }
-    var lastNewFingerUptime = firstDownUptime
     var event = firstDown.event
-    val intentThreshold = GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT
+    val state = FingerGatherState(
+        firstDownUptime = firstDown.change.uptimeMillis,
+        firstFrame = event.changes.filter { it.pressed }.map { it.toGatherFinger() },
+        moveSlopPx = gatherSlopPx,
+    )
     var intentReported = false
 
     while (true) {
         val pressed = event.changes.filter { it.pressed }
-        if (pressed.isEmpty()) {
-            // 手势在窗口内就结束了：立刻放手，否则触控板层等不到裁决、这次轻点会丢
-            PocketGestureLog.decision("凑指窗口内所有手指抬起 → 放手给触控板层")
-            return null
-        }
-        if (pressed.size >= GestureConstants.REQUIRED_FINGER_COUNT) {
-            return GatheredFingers(event = event, pressedCount = pressed.size)
-        }
-
-        val latestUptime = pressed.maxOfOrNull { it.uptimeMillis } ?: lastNewFingerUptime
-        val newFingerArrived = pressed.any { !baseline.containsKey(it.id) }
-        if (newFingerArrived) {
-            // 有新手指落下：续期 + 重设位移基准
-            baseline = pressed.associate { it.id to it.position }
-            lastNewFingerUptime = latestUptime
-            PocketGestureLog.trace("第 ${pressed.size} 指落下（窗口续期到 +${GestureConstants.FINGER_GATHER_RENEW_MS}ms）")
-            if (pressed.size >= intentThreshold) {
-                // 意图明确：让页面收起系统输入法、按键层停止激活，把屏幕让给五指手势
-                gate()?.observeGather(fingerCount = pressed.size, claimed = false)
-                if (!intentReported) {
-                    intentReported = true
-                    handler().onIntent(pressed.size)
-                }
-            }
-        } else if (pressed.any { change ->
-                val from = baseline[change.id] ?: return@any false
-                fingerTravel(change.position, from) > gatherSlopPx
-            }
-        ) {
-            // 没有新手指、而已按下的手指明显在动 → 这是正在进行的触控板手势
-            PocketGestureLog.decision(
-                "${pressed.size} 指按下且有手指位移超过 ${"%.0f".format(gatherSlopPx)}px" +
-                    "（没有新手指落下）→ 放手给触控板层",
-            )
-            return null
-        }
-
-        val deadline = minOf(
-            lastNewFingerUptime + GestureConstants.FINGER_GATHER_RENEW_MS,
-            hardDeadline,
+        val latestUptime = pressed.maxOfOrNull { it.uptimeMillis }
+            ?: firstDown.change.uptimeMillis
+        val verdict = state.observe(
+            pressed = pressed.map { it.toGatherFinger() },
+            nowUptime = latestUptime,
         )
-        val remaining = deadline - latestUptime
-        if (remaining <= 0L) {
-            PocketGestureLog.decision(
-                "凑指窗口到期（仅 ${pressed.size} 指，续期 ${GestureConstants.FINGER_GATHER_RENEW_MS}ms / " +
-                    "上限 ${GestureConstants.FINGER_GATHER_MAX_MS}ms）→ 放手给触控板层",
-            )
-            return null
+        when (verdict) {
+            is GatherVerdict.Gathered ->
+                return GatheredFingers(event = event, pressedCount = verdict.fingerCount)
+
+            is GatherVerdict.Release -> {
+                when (verdict.reason) {
+                    GatherReleaseReason.ALL_FINGERS_UP ->
+                        PocketGestureLog.decision("凑指窗口内所有手指抬起 → 放手给触控板层")
+                    GatherReleaseReason.FINGERS_MOVING ->
+                        PocketGestureLog.decision(
+                            "${pressed.size} 指按下且有手指位移超过 " +
+                                "${"%.0f".format(gatherSlopPx)}px（没有新手指落下，≤2 指）" +
+                                " → 放手给触控板层",
+                        )
+                    GatherReleaseReason.WINDOW_EXPIRED ->
+                        PocketGestureLog.decision(
+                            "凑指窗口到期（仅 ${pressed.size} 指，续期 " +
+                                "${GestureConstants.FINGER_GATHER_RENEW_MS}ms / " +
+                                "上限 ${GestureConstants.FINGER_GATHER_MAX_MS}ms）→ 放手给触控板层",
+                        )
+                }
+                return null
+            }
+
+            is GatherVerdict.Waiting -> {
+                if (verdict.intentEstablished && !intentReported) {
+                    // 意图明确：让页面收起系统输入法、按键层停止激活，把屏幕让给五指手势。
+                    // 只报一次（onIntent 是「意图出现」事件，不需要每个事件重发）
+                    intentReported = true
+                    gate()?.observeGather(fingerCount = verdict.fingerCount, claimed = false)
+                    handler().onIntent(verdict.fingerCount)
+                }
+                // 日志只打「新手指落下」这一行：移动事件也打会把 logcat 刷爆，
+                // 而排查「为什么凑不齐」只需要知道每根手指的落下时刻
+                if (verdict.newFingerArrived) {
+                    PocketGestureLog.trace(
+                        "第 ${verdict.fingerCount} 指落下（本轮窗口剩 " +
+                            "${verdict.deadlineUptime - latestUptime}ms）",
+                    )
+                }
+                val remaining = verdict.deadlineUptime - latestUptime
+                // remaining <= 0 时 observe 已经给出 WINDOW_EXPIRED，这里是防御
+                val next = if (remaining <= 0L) {
+                    null
+                } else {
+                    withTimeoutOrNull(remaining) { awaitPointerEvent(PointerEventPass.Initial) }
+                }
+                if (next == null) {
+                    PocketGestureLog.decision(
+                        "凑指窗口等待超时（剩 ${remaining}ms 无新事件）→ 放手给触控板层",
+                    )
+                    return null
+                }
+                event = next
+            }
         }
-        val next = withTimeoutOrNull(remaining) {
-            awaitPointerEvent(PointerEventPass.Initial)
-        } ?: run {
-            PocketGestureLog.decision("凑指窗口等待超时（剩余 ${remaining}ms 无新事件）→ 放手给触控板层")
-            return null
-        }
-        event = next
     }
 }
+
+/** `PointerInputChange` → 凑指判定的纯数据表示。 */
+private fun PointerInputChange.toGatherFinger(): GatherFinger = GatherFinger(
+    pointerId = id.value,
+    x = position.x,
+    y = position.y,
+    uptimeMillis = uptimeMillis,
+)
 
 /** 一根手指从基准位置 [from] 走到 [to] 的直线距离（px）。 */
 private fun fingerTravel(to: Offset, from: Offset): Float =

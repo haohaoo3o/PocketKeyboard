@@ -7,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -23,6 +24,7 @@ class HidDeviceTransportTest {
         var registerAppAccepted: Boolean = true
         var sdpRecord: HidSdpRecord? = null
         var connectShouldFail: Boolean = false
+        var sendReportShouldFail: Boolean = false
         val sentReports = mutableListOf<SentReport>()
         val replies = mutableListOf<Triple<String, Int, ByteArray>>()
         val connectCalls = mutableListOf<String>()
@@ -59,7 +61,13 @@ class HidDeviceTransportTest {
             return registerAppAccepted
         }
 
-        override fun unregisterApp(): Boolean = true
+        /** 自愈会反复清残留注册，统计调用次数供断言。 */
+        var unregisterAppCalls = 0
+
+        override fun unregisterApp(): Boolean {
+            unregisterAppCalls += 1
+            return true
+        }
 
         override fun connect(address: String): Boolean {
             connectCalls.add(address)
@@ -70,7 +78,7 @@ class HidDeviceTransportTest {
 
         override fun sendReport(address: String, reportId: Int, data: ByteArray): Boolean {
             sentReports.add(SentReport(address, reportId, data))
-            return true
+            return !sendReportShouldFail
         }
 
         override fun replyReport(address: String, reportType: Int, reportId: Int, data: ByteArray): Boolean {
@@ -147,6 +155,8 @@ class HidDeviceTransportTest {
         var paired: List<HidDeviceInfo>? = null
         val connectedHosts = mutableListOf<HidDeviceInfo>()
         val disconnectedHosts = mutableListOf<String>()
+        val connecting = mutableListOf<String>()
+        val connectFailed = mutableListOf<String>()
         var active: HidDeviceInfo? = null
         val bondStates = mutableListOf<Pair<String, HidBondState>>()
         var pairing: Triple<String, HidPairingVariant, Int?>? = null
@@ -169,6 +179,14 @@ class HidDeviceTransportTest {
 
         override fun onHostDisconnected(address: String) {
             disconnectedHosts.add(address)
+        }
+
+        override fun onHostConnecting(address: String) {
+            connecting.add(address)
+        }
+
+        override fun onHostConnectFailed(address: String) {
+            connectFailed.add(address)
         }
 
         override fun onActiveDeviceChanged(device: HidDeviceInfo?) {
@@ -285,7 +303,7 @@ class HidDeviceTransportTest {
     }
 
     @Test
-    fun `register app rejection is reported as registration rejected`() {
+    fun `register rejection without callback self-heals then reports registration rejected`() {
         val gateway = FakeGateway().apply { registerAppAccepted = false }
         val h = harness(gateway = gateway)
         val transport = h.transport
@@ -294,7 +312,37 @@ class HidDeviceTransportTest {
         transport.start()
         gateway.fireOpen()
 
+        // 真结果只看回调：回调缺席时先自愈，而不是立刻判死（MIUI 怪癖：App 重启后的
+        // 首次注册会被服务端静默弹回，unregisterApp 清残留 + 重注册才能恢复）
+        assertNull(listener.unavailable)
+
+        // 3 轮自愈：看门狗 → unregisterApp 清残留 + 重建代理 → 重注册（均不上报）
+        repeat(3) {
+            h.scheduler.runPending("#registration-watchdog")
+            h.scheduler.runPending("#registration-retry")
+            h.gateway.fireOpen()
+            assertNull(listener.unavailable)
+        }
+        // 第 4 次看门狗到期：自愈轮数用尽 → 才上报注册被拒
+        h.scheduler.runPending("#registration-watchdog")
         assertEquals(HidUnavailableReason.REGISTRATION_REJECTED, listener.unavailable)
+        assertTrue(gateway.unregisterAppCalls >= 3)
+    }
+
+    @Test
+    fun `registration callback arrival counts as success even when registerApp returned false`() {
+        // ROM 怪癖：registerApp 返回 false 但回调说注册成功——以回调为准，不触发自愈
+        val gateway = FakeGateway().apply { registerAppAccepted = false }
+        val h = harness(gateway = gateway)
+        h.transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        assertNull(h.listener.unavailable)
+        assertTrue(h.transport.isAppRegistered)
+        // 看门狗已被撤销：剩余调度再跑也不会触发自愈
+        h.scheduler.runPending("#registration-watchdog")
+        assertNull(h.listener.unavailable)
     }
 
     @Test
@@ -701,6 +749,279 @@ class HidDeviceTransportTest {
         transport.stop()
 
         assertEquals(emptySet<String>(), listener.connectedAddresses)
+    }
+
+    // ---------------------------------------------------------------- A1：连接状态只认系统真值
+
+    @Test
+    fun `plugged device is not registered as connected`() {
+        val h = harness()
+        val transport = h.transport
+        val listener = h.listener
+        val gateway = h.gateway
+        transport.start()
+        // plugged 设备通常同时是已配对设备（注册时刷新 bonded 列表会拿到名字）
+        gateway.bonded.add(host)
+        gateway.fireOpen()
+        // MIUI 实机现象：plugged 非空，但 getConnectedDevices() 空、
+        // getConnectionState() = DISCONNECTED —— 连接并没有在 profile 层建立
+        gateway.appStatus(host.address, true)
+
+        // A1：plugged 不再写 registry 的 connected（这就是此前的假阳性来源）
+        assertFalse(transport.registry.isConnected(host.address))
+        assertEquals(emptySet<String>(), listener.connectedAddresses)
+        // plugged 只用于自动选定控制目标
+        assertEquals(host.address, transport.registry.activeAddress)
+        assertEquals(host.address, listener.active?.address)
+    }
+
+    @Test
+    fun `registration auto connects the plugged device once`() {
+        val h = harness()
+        val transport = h.transport
+        val listener = h.listener
+        val gateway = h.gateway
+        transport.start()
+        gateway.bonded.add(host)
+        gateway.fireOpen()
+        gateway.appStatus(host.address, true)
+
+        // A2(c)：注册成功 → 对 plugged 线索主动 connectHost 一次，UI 进入「连接中」
+        assertEquals(listOf(host.address), gateway.connectCalls)
+        assertEquals(listOf(host.address), listener.connecting)
+        assertEquals(HidHostRegistry.STATE_CONNECTING, transport.registry.entry(host.address)?.connectionState)
+        // 命令已接受（fake 默认成功）：不应出现失败提示
+        assertEquals(emptyList<String>(), listener.connectFailed)
+    }
+
+    @Test
+    fun `registration does not connect when there is no target at all`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        transport.start()
+        gateway.fireOpen()
+        // 没有任何 plugged 线索、没有已连接主机、没有已选目标 → 无可连接对象
+        gateway.appStatus(null, true)
+
+        assertTrue(gateway.connectCalls.isEmpty())
+        assertTrue(h.listener.connecting.isEmpty())
+    }
+
+    @Test
+    fun `connected device at registration is confirmed as the active target`() {
+        val h = harness()
+        val transport = h.transport
+        val listener = h.listener
+        val gateway = h.gateway
+        transport.start()
+        gateway.fireOpen()
+        gateway.bonded.add(host)
+        gateway.appStatus(null, true)
+        // 注册前系统已建立连接：fallback 的 getConnectionState 兜底应认它
+        gateway.connected.add(host)
+        gateway.appStatus(null, true)
+
+        assertTrue(transport.registry.isConnected(host.address))
+        assertEquals(setOf(host.address), listener.connectedAddresses)
+        // 已连接的目标不重复发起连接
+        assertTrue(gateway.connectCalls.isEmpty())
+        assertEquals(host.address, listener.active?.address)
+    }
+
+    // ---------------------------------------------------------------- A1：sendReport 返回值可见
+
+    @Test
+    fun `gateway send report result is propagated to the caller`() {
+        val gateway = FakeGateway().apply { sendReportShouldFail = true }
+        val h = harness(gateway = gateway)
+        val transport = h.transport
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+
+        // A1：sendToActive 必须把 gateway.sendReport 的返回值透传出来（日志与调用方
+        // 都据此判断「命令是否真的下发」），而不是静默吞掉
+        val sent = transport.sendToActive(
+            HidReportFactory.REPORT_ID_KEYBOARD,
+            byteArrayOf(0, 0, HidUsage.KEY_A.toByte()),
+        )
+
+        assertFalse(sent)
+        // 即使失败也真的下发了（fake 记录了调用），与「未连接直接丢弃」区分开
+        assertEquals(1, gateway.sentReports.size)
+
+        gateway.sendReportShouldFail = false
+        assertTrue(
+            transport.sendToActive(
+                HidReportFactory.REPORT_ID_KEYBOARD,
+                byteArrayOf(0, 0, HidUsage.KEY_Z.toByte()),
+            ),
+        )
+    }
+
+    // ---------------------------------------------------------------- A2：未连接暂存 → 连接后补发
+
+    @Test
+    fun `report is stashed while not connected and flushed after connect`() {
+        val h = harness()
+        val transport = h.transport
+        val listener = h.listener
+        val gateway = h.gateway
+        transport.start()
+        gateway.bonded.add(host)
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        // 选中目标但连接还没建立：报告暂存 + 主动连接，不直接丢弃
+        transport.setActiveDevice(host.address)
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_A.toByte()))
+
+        assertTrue(gateway.sentReports.isEmpty())
+        assertEquals(listOf(host.address), listener.connecting)
+        assertEquals(1, gateway.connectCalls.size)
+
+        // 连接建立（系统真值）→ 暂存的报告补发到目标
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+
+        assertEquals(1, gateway.sentReports.size)
+        val flushed = gateway.sentReports.single()
+        assertEquals(host.address, flushed.address)
+        assertEquals(HidReportFactory.REPORT_ID_KEYBOARD, flushed.reportId)
+        assertEquals(HidUsage.KEY_A.toByte(), flushed.data[2])
+    }
+
+    @Test
+    fun `newer reports overwrite the stash so the flush sends the latest state`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        transport.start()
+        gateway.bonded.add(host)
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.setActiveDevice(host.address)
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_A.toByte()))
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_Z.toByte()))
+
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+
+        // 补发的是最新一次报告（B），不是陈旧的 A
+        assertEquals(1, gateway.sentReports.size)
+        assertEquals(HidUsage.KEY_Z.toByte(), gateway.sentReports.single().data[2])
+    }
+
+    @Test
+    fun `one shot consumer usage is dropped instead of stashed`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        transport.start()
+        gateway.bonded.add(host)
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.setActiveDevice(host.address)
+        transport.sendConsumerUsage(HidUsage.CONSUMER_VOLUME_UP)
+
+        // 一次性事件不暂存：连接后补发会造成多余的音量跳变
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+
+        assertTrue(gateway.sentReports.isEmpty())
+    }
+
+    @Test
+    fun `stashed report is discarded when the host disconnects before connecting`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        val scheduler = h.scheduler
+        transport.start()
+        gateway.bonded.add(host)
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.setActiveDevice(host.address)
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_A.toByte()))
+        // 连接成功前又断了（主机侧拒绝 / 抢在连接前断开）：暂存的报告作废
+        gateway.connectionState(host.address, HidHostRegistry.STATE_DISCONNECTED)
+        // 断开会排退避重试；这里验证的不是重连，而是暂存作废
+        assertTrue(scheduler.pending.containsKey(host.address))
+
+        // 之后再连上也不应补发连接前就已经作废的报告
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+
+        assertTrue(gateway.sentReports.isEmpty())
+        // 连接成功后重试调度被取消
+        assertFalse(scheduler.pending.containsKey(host.address))
+    }
+
+    @Test
+    fun `flush also happens when the fallback state query sees the host connected`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        transport.start()
+        gateway.bonded.add(host)
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.setActiveDevice(host.address)
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_A.toByte()))
+        assertTrue(gateway.sentReports.isEmpty())
+
+        // 没有 onConnectionStateChanged，只有 getConnectedDevices() / 逐地址
+        // getConnectionState 兜底说已连接（再走一遍注册路径即可触发）
+        gateway.connected.add(host)
+        gateway.appStatus(null, true)
+
+        assertTrue(transport.registry.isConnected(host.address))
+        assertEquals(1, gateway.sentReports.size)
+        assertEquals(host.address, gateway.sentReports.single().address)
+    }
+
+    // ---------------------------------------------------------------- A2：连接失败可见 + 不重复发起
+
+    @Test
+    fun `failed connect reports failure and schedules a reconnect`() {
+        val gateway = FakeGateway().apply { connectShouldFail = true }
+        val h = harness(gateway = gateway)
+        val transport = h.transport
+        val listener = h.listener
+        val scheduler = h.scheduler
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.connectHost(host.address)
+
+        assertEquals(listOf(host.address), listener.connectFailed)
+        assertEquals(ReconnectPolicy.delayFor(1), scheduler.pending[host.address]?.first)
+        assertEquals(
+            HidHostRegistry.STATE_DISCONNECTED,
+            transport.registry.entry(host.address)?.connectionState,
+        )
+    }
+
+    @Test
+    fun `repeated connect host does not re-initiate while already connecting`() {
+        val h = harness()
+        val transport = h.transport
+        val listener = h.listener
+        val gateway = h.gateway
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.connectHost(host.address)
+        transport.connectHost(host.address)
+
+        assertEquals(1, gateway.connectCalls.size)
+        // 第二次只让 UI 保持「连接中」，不再下一次 connect 命令
+        assertEquals(listOf(host.address, host.address), listener.connecting)
+        assertEquals(emptyList<String>(), listener.connectFailed)
     }
 
     @Test

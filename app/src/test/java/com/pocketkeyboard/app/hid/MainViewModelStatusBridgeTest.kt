@@ -112,4 +112,72 @@ class MainViewModelStatusBridgeTest {
             viewModel.pairedDevices.value,
         )
     }
+
+    // ------------------------------------------------------------ A2：连接中 / 连接失败桥接
+
+    @Test
+    fun `connecting sets the connecting address and clears a prior failure`() {
+        viewModel.setConnectFailedAddress(ADDRESS)
+
+        bridge.onHostConnecting(ADDRESS)
+
+        assertEquals(ADDRESS, viewModel.connectingDeviceAddress.value)
+        assertNull(viewModel.connectFailedAddress.value)
+    }
+
+    @Test
+    fun `connect failed sets the failed address and clears connecting`() {
+        viewModel.setConnectingDeviceAddress(ADDRESS)
+
+        bridge.onHostConnectFailed(ADDRESS)
+
+        assertNull(viewModel.connectingDeviceAddress.value)
+        assertEquals(ADDRESS, viewModel.connectFailedAddress.value)
+    }
+
+    @Test
+    fun `connected snapshot clears connecting and failed flags for that host`() {
+        viewModel.setConnectingDeviceAddress(ADDRESS)
+        viewModel.setConnectFailedAddress(OTHER_ADDRESS)
+
+        bridge.onConnectedDevicesChanged(setOf(ADDRESS))
+
+        assertNull(viewModel.connectingDeviceAddress.value)
+        // 另一个host的失败提示与本 host 的连接无关，保持不动
+        assertEquals(OTHER_ADDRESS, viewModel.connectFailedAddress.value)
+    }
+
+    @Test
+    fun `disconnect clears the connecting flag for that host`() {
+        viewModel.setConnectingDeviceAddress(ADDRESS)
+
+        bridge.onHostDisconnected(ADDRESS)
+
+        assertNull(viewModel.connectingDeviceAddress.value)
+    }
+
+    @Test
+    fun `registration success clears the unavailable reason`() {
+        bridge.onUnavailable(HidUnavailableReason.MISSING_PERMISSION)
+        assertEquals(HidUnavailableReason.MISSING_PERMISSION, bridge.unavailableReason.value)
+
+        bridge.onAppRegistrationChanged(registered = true)
+
+        assertNull(bridge.unavailableReason.value)
+    }
+
+    @Test
+    fun `unavailable reason survives a failed registration`() {
+        bridge.onUnavailable(HidUnavailableReason.PROFILE_UNAVAILABLE)
+
+        bridge.onAppRegistrationChanged(registered = false)
+
+        // 注册失败的原因必须留着给 UI 显示
+        assertEquals(HidUnavailableReason.PROFILE_UNAVAILABLE, bridge.unavailableReason.value)
+    }
+
+    private companion object {
+        const val ADDRESS = "AA:BB:CC:DD:EE:01"
+        const val OTHER_ADDRESS = "AA:BB:CC:DD:EE:02"
+    }
 }

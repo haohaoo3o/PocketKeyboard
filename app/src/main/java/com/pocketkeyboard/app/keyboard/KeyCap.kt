@@ -86,8 +86,10 @@ private val KeyCapTextStyle = TextStyle(
  *
  * ## 与五指挥势层的关系
  * 每个键帽都挂 `Modifier.pocketKeyGestures`（见 gesture/KeyPointerInput.kt）：
- * 只响应单指；一旦按下指针数达到 5 就停止消费、放弃本轮按下（`onAbandoned`），
- * 把事件放行给页面容器最底层的五指挥势层。**键盘层因此不会消费五指挥势**。
+ * 只响应单指；一旦这次触摸被判定为五指挥势——本节点数到 5 根手指，或共享闸门
+ * （父层 `Modifier.pocketGestures` 在 Initial pass 看到的全局手指数）报出 ≥3 指意图——
+ * 就放弃本轮按下（`onAbandoned`，视觉下陷同步回弹），把事件放行给页面容器最底层的
+ * 五指挥势层。**键盘层因此不会误触五指挥势**。
  *
  * @param spec 键位描述（见 [KeySpec]）
  * @param fnActive fn 是否活跃（按住或粘滞）：F 行改显示 F1–F12 大字号本义标签，
@@ -193,11 +195,16 @@ fun KeyCap(
                         onRelease()
                     },
                     onAbandoned = {
-                        // 按下指针数达到 5：本次按下被判定为五指挥势，作废按键。
-                        // 门控期间从未调用过 onPress，因此这里不需要补发松键
+                        // 按下指针数达到 5 / 闸门报出五指意图：本次按下被判定为五指挥势，
+                        // 作废按键。门控期间从未调用过 onPress，因此这里不需要补发松键
                         abandoned = true
                         pressed = false
                         onAbandoned()
+                    },
+                    onCancelled = {
+                        // 手势被系统取消（ACTION_CANCEL）时的兜底：撤销视觉下陷，
+                        // 别让键帽永久卡在按下态（真机多指常被系统手势监视器截走）
+                        pressed = false
                     },
                 ),
             ),

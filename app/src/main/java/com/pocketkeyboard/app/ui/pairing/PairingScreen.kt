@@ -88,6 +88,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketkeyboard.app.R
 import com.pocketkeyboard.app.hid.BondRemoval
 import com.pocketkeyboard.app.hid.HidController
+import com.pocketkeyboard.app.hid.HidStatusText
 import com.pocketkeyboard.app.hid.removeBondAndConfirm
 import com.pocketkeyboard.app.ui.AppMode
 import com.pocketkeyboard.app.ui.DevicePlatform
@@ -199,6 +200,9 @@ fun PairingScreen(
     val activeDevice by viewModel.activeDevice.collectAsStateWithLifecycle()
     val pinCode by viewModel.pinCode.collectAsStateWithLifecycle()
     val connectedAddresses by viewModel.connectedDeviceAddresses.collectAsStateWithLifecycle()
+    // A2：主动连接的行内状态（连接中 / 连接失败）——点击设备行后立刻有可见反馈
+    val connectingAddress by viewModel.connectingDeviceAddress.collectAsStateWithLifecycle()
+    val connectFailedAddress by viewModel.connectFailedAddress.collectAsStateWithLifecycle()
 
     var localBluetooth by remember { mutableStateOf(LocalBluetoothState()) }
     // 未确认平台设备首次点击 → 选平台；长按 → 重选平台；左滑 → 删除确认
@@ -306,6 +310,19 @@ fun PairingScreen(
         )
         Spacer(modifier = Modifier.height(12.dp))
 
+        // HID 后端不可用提示：`MainViewModelStatusBridge.unavailableReason` 一直没接 UI，
+        // 权限被拒 / 蓝牙未开 / profile 被 ROM 禁用时用户只看到「点了没反应」却看不到
+        // 原因。注册成功后 bridge 自动清掉本提示（见 bridge.onAppRegistrationChanged）。
+        hidController?.let { controller ->
+            val unavailableReason by controller.unavailableReason
+                .collectAsStateWithLifecycle(initialValue = null)
+            unavailableReason?.let { reason ->
+                HidUnavailableBanner(
+                    message = stringResource(HidStatusText.unavailableMessage(reason)),
+                )
+            }
+        }
+
         PairingHeader(
             localBluetooth = localBluetooth,
             discoverableSeconds = discoverableSeconds,
@@ -333,6 +350,8 @@ fun PairingScreen(
             newDevices = pairedDevices.filter { platforms[it.address] == null },
             activeDevice = activeDevice,
             connectedAddresses = connectedAddresses,
+            connectingAddress = connectingAddress,
+            connectFailedAddress = connectFailedAddress,
             onDeviceClick = { device ->
                 val knownPlatform = platforms[device.address]
                 if (knownPlatform == null) {
@@ -344,6 +363,11 @@ fun PairingScreen(
                     // 写用以 DataStore 为准的平台覆盖回来，保证展示与布局正确
                     hidController?.setActiveDevice(device.address)
                     viewModel.setActiveDevice(device.copy(platform = knownPlatform))
+                    // A2：选中即主动发起连接（设备侧 HID L2CAP），UI 立刻显示
+                    // 「连接中…」；已连接的设备不重复发起
+                    if (device.address !in connectedAddresses) {
+                        hidController?.connectHost(device.address)
+                    }
                 }
             },
             onDeviceLongClick = { device -> reselectDevice = device },
@@ -356,8 +380,10 @@ fun PairingScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // 症状 1：CONTROL 按钮只要选中了设备就可点（进入键盘页），连接状态不再
+        // 拦截进入，另用下方文案显示——灰按钮不该是唯一的状态信号。
         ControlButton(
-            connected = activeDevice != null,
+            enabled = activeDevice != null,
             onClick = {
                 if (activeDevice != null) {
                     // 键盘页入口只通过 MainViewModel 切换 mode
@@ -366,6 +392,29 @@ fun PairingScreen(
                     showControlHint = true
                 }
             },
+        )
+
+        // 连接状态文案：与设备行 chip 同源（connectedDeviceAddresses / connecting /
+        // connectFailed），选中设备后即使还没连上也能看到正在发生什么。
+        val controlTarget = activeDevice
+        val controlStatusRes = when {
+            controlTarget == null -> R.string.pairing_control_status_none
+            controlTarget.address in connectedAddresses ->
+                R.string.pairing_control_status_connected
+            controlTarget.address == connectingAddress ->
+                R.string.pairing_control_status_connecting
+            controlTarget.address == connectFailedAddress ->
+                R.string.pairing_control_status_failed
+            else -> R.string.pairing_control_status_not_connected
+        }
+        Text(
+            text = stringResource(controlStatusRes),
+            style = MaterialTheme.typography.bodyMedium,
+            color = PureWhite.copy(alpha = 0.55f),
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 10.dp),
         )
 
         ControlHint(visible = showControlHint)
@@ -399,6 +448,10 @@ fun PairingScreen(
                         }
                     },
                 )
+                // A2：首次选完平台同样主动发起连接（已连接的不重复发起）
+                if (device.address !in connectedAddresses) {
+                    hidController?.connectHost(device.address)
+                }
                 pendingDevice = null
             },
             onDismiss = { pendingDevice = null },
@@ -624,6 +677,8 @@ private fun PinCodeBlock(pinCode: String?, modifier: Modifier = Modifier) {
  * @param onDeviceClick 点击行（已确认 = 切换控制目标；未确认 = 弹平台选择）
  * @param onDeviceLongClick 长按行（重新选择平台）
  * @param onDeviceDelete 侧滑露出删除并确认后回调（removeBond + 清 DataStore）
+ * @param connectingAddress 正在主动连接的地址（A2：行内「连接中…」）
+ * @param connectFailedAddress 最近一次主动连接下发失败的地址（A2：行内「连接失败」）
  */
 @Composable
 private fun DeviceSections(
@@ -631,6 +686,8 @@ private fun DeviceSections(
     newDevices: List<PairedDevice>,
     activeDevice: PairedDevice?,
     connectedAddresses: Set<String>,
+    connectingAddress: String?,
+    connectFailedAddress: String?,
     onDeviceClick: (PairedDevice) -> Unit,
     onDeviceLongClick: (PairedDevice) -> Unit,
     onDeviceDelete: (PairedDevice) -> Unit,
@@ -647,6 +704,8 @@ private fun DeviceSections(
             devices = confirmedDevices,
             activeDevice = activeDevice,
             connectedAddresses = connectedAddresses,
+            connectingAddress = connectingAddress,
+            connectFailedAddress = connectFailedAddress,
             onDeviceClick = onDeviceClick,
             onDeviceLongClick = onDeviceLongClick,
             onDeviceDelete = onDeviceDelete,
@@ -658,6 +717,8 @@ private fun DeviceSections(
             devices = newDevices,
             activeDevice = activeDevice,
             connectedAddresses = connectedAddresses,
+            connectingAddress = connectingAddress,
+            connectFailedAddress = connectFailedAddress,
             onDeviceClick = onDeviceClick,
             onDeviceLongClick = onDeviceLongClick,
             onDeviceDelete = onDeviceDelete,
@@ -673,6 +734,8 @@ private fun DeviceSection(
     devices: List<PairedDevice>,
     activeDevice: PairedDevice?,
     connectedAddresses: Set<String>,
+    connectingAddress: String?,
+    connectFailedAddress: String?,
     onDeviceClick: (PairedDevice) -> Unit,
     onDeviceLongClick: (PairedDevice) -> Unit,
     onDeviceDelete: (PairedDevice) -> Unit,
@@ -700,6 +763,8 @@ private fun DeviceSection(
                 device = device,
                 selected = device.address == activeDevice?.address,
                 connected = device.address in connectedAddresses,
+                connecting = device.address == connectingAddress,
+                connectFailed = device.address == connectFailedAddress,
                 onClick = { onDeviceClick(device) },
                 onLongClick = { onDeviceLongClick(device) },
                 onDelete = { onDeviceDelete(device) },
@@ -711,6 +776,10 @@ private fun DeviceSection(
 
 /**
  * 单个设备行：平台图标 + 设备名 + 平台类型 + 角标，支持左滑删除与长按重选平台（Bug 3）。
+ *
+ * 选中态加强（症状 1）：当前控制目标带**白色描边** + 「当前控制目标」小标，点击后
+ * 即使连接还没建立也能从行上看到「连接中… → 已连接 / 连接失败」的流转——不再出现
+ * 「点了没反应」。
  *
  * ## 手势仲裁（与 MainActivity 边缘滑激活层同一套思路）
  * 侧滑识别挂在**外层**、读 [PointerEventPass.Initial]（父先于子），只在横向位移超过
@@ -724,6 +793,8 @@ private fun DeviceRow(
     device: PairedDevice,
     selected: Boolean,
     connected: Boolean,
+    connecting: Boolean,
+    connectFailed: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onDelete: () -> Unit,
@@ -775,6 +846,18 @@ private fun DeviceRow(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(14.dp))
                 .background(MinimalGray)
+                // 选中态加强：当前控制目标加白色描边（症状 1：一眼看到选中了谁）
+                .then(
+                    if (selected) {
+                        Modifier.border(
+                            width = 1.5.dp,
+                            color = PureWhite,
+                            shape = RoundedCornerShape(14.dp),
+                        )
+                    } else {
+                        Modifier
+                    },
+                )
                 .pointerInput(revealWidthPx) {
                     val touchSlop = viewConfiguration.touchSlop
                     awaitEachGesture {
@@ -855,12 +938,24 @@ private fun DeviceRow(
                     color = PureWhite.copy(alpha = 0.5f),
                 )
             }
-            // 角标列：「已连接」（HID registry 快照）+「当前控制目标」
-            if (connected || selected) {
+            // 角标列：「已连接 / 连接中… / 连接失败」（A2 状态流转）+「当前控制目标」
+            if (connected || connecting || connectFailed || selected) {
                 Spacer(modifier = Modifier.width(8.dp))
                 Column(horizontalAlignment = Alignment.End) {
-                    if (connected) {
-                        Badge(text = stringResource(R.string.pairing_device_connected))
+                    when {
+                        connected -> Badge(text = stringResource(R.string.pairing_device_connected))
+                        connecting -> Badge(
+                            text = stringResource(R.string.pairing_device_connecting),
+                            contentColor = PureWhite.copy(alpha = 0.75f),
+                            borderColor = PureWhite.copy(alpha = 0.4f),
+                        )
+                        connectFailed -> Badge(
+                            text = stringResource(R.string.pairing_device_connect_failed),
+                            contentColor = DestructiveRed,
+                            borderColor = DestructiveRed.copy(alpha = 0.6f),
+                        )
+                    }
+                    if (connected || connecting || connectFailed) {
                         Spacer(modifier = Modifier.height(4.dp))
                     }
                     if (selected) {
@@ -872,14 +967,19 @@ private fun DeviceRow(
     }
 }
 
-/** 设备行右下角的小角标（已连接 / 当前控制目标）。 */
+/** 设备行右下角的小角标（已连接 / 连接中 / 连接失败 / 当前控制目标）。 */
 @Composable
-private fun Badge(text: String, modifier: Modifier = Modifier) {
+private fun Badge(
+    text: String,
+    modifier: Modifier = Modifier,
+    contentColor: Color = PureWhite.copy(alpha = 0.75f),
+    borderColor: Color = PureWhite.copy(alpha = 0.4f),
+) {
     Box(
         modifier = modifier
             .border(
                 width = 1.dp,
-                color = PureWhite.copy(alpha = 0.4f),
+                color = borderColor,
                 shape = RoundedCornerShape(percent = 50),
             )
             .padding(horizontal = 10.dp, vertical = 4.dp),
@@ -887,7 +987,7 @@ private fun Badge(text: String, modifier: Modifier = Modifier) {
         Text(
             text = text,
             style = MaterialTheme.typography.labelLarge,
-            color = PureWhite.copy(alpha = 0.75f),
+            color = contentColor,
             maxLines = 1,
         )
     }
@@ -932,26 +1032,57 @@ private fun platformIconDescription(platform: DevicePlatform): Int = when (platf
     DevicePlatform.OTHER -> R.string.pairing_platform_icon_other
 }
 
-/** CONTROL 大按钮：未连接设备时灰色不可点动，连接后黑底白字可点击进入键盘页。 */
+/**
+ * CONTROL 大按钮（症状 1）。
+ *
+ * 只要选中了设备就可点（enabled = 有控制目标），点击即进入键盘页；**连接状态不再
+ * 拦截进入**，另由按钮下方的状态文案与设备行角标显示——灰按钮不该是唯一的状态信号。
+ * 未选设备时仍接收点击，用于给出「请先选择设备」提示。
+ */
 @Composable
 private fun ControlButton(
-    connected: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     AppleButton(
         text = stringResource(R.string.pairing_control),
-        // 始终接收点击：未连接时点击用于给出「请先配对」提示
+        // 始终接收点击：未选设备时点击用于给出「请先配对」提示
         onClick = onClick,
         modifier = modifier
             .fillMaxWidth()
             .height(66.dp),
         shape = RoundedCornerShape(20.dp),
-        containerColor = if (connected) PureBlack else MinimalGray,
-        contentColor = if (connected) PureWhite else PureWhite.copy(alpha = DISABLED_ALPHA),
-        borderColor = if (connected) PureWhite else null,
+        containerColor = if (enabled) PureBlack else MinimalGray,
+        contentColor = if (enabled) PureWhite else PureWhite.copy(alpha = DISABLED_ALPHA),
+        borderColor = if (enabled) PureWhite else null,
         textStyle = MaterialTheme.typography.titleLarge.copy(letterSpacing = 4.sp),
     )
+}
+
+/**
+ * HID 后端不可用提示条（配对页顶部）。
+ *
+ * 配色沿用纯黑 / 纯白语言 + 删除操作的警示红，与页面里其它内联提示同一层级；
+ * 出现即代表「现在连不了」，注册成功后由 bridge 清掉。
+ */
+@Composable
+private fun HidUnavailableBanner(message: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = DestructiveRed.copy(alpha = 0.12f),
+        border = BorderStroke(width = 1.dp, color = DestructiveRed.copy(alpha = 0.5f)),
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = PureWhite.copy(alpha = 0.85f),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+        )
+    }
 }
 
 /** 未连接设备时点击 CONTROL 的内联提示。 */

@@ -57,6 +57,26 @@ class MainViewModel : ViewModel() {
      */
     val connectedDeviceAddresses: StateFlow<Set<String>> = _connectedDeviceAddresses.asStateFlow()
 
+    private val _connectingDeviceAddress = MutableStateFlow<String?>(null)
+
+    /**
+     * 正在主动连接（设备侧发起 HID L2CAP）的设备地址，null 表示没有进行中的连接（Bug A2）。
+     *
+     * 配对页据此把设备行切成「连接中…」：点设备行 / 注册后自动连接 / 退避重试都会经过
+     * `MainViewModelStatusBridge.onHostConnecting` 置位，连接结果出来后清空。
+     */
+    val connectingDeviceAddress: StateFlow<String?> = _connectingDeviceAddress.asStateFlow()
+
+    private val _connectFailedAddress = MutableStateFlow<String?>(null)
+
+    /**
+     * 最近一次主动连接**下发失败**（`BluetoothHidDevice.connect` 返回 false）的地址（Bug A2）。
+     *
+     * 底层仍会按退避策略重试（每次重试重新走 onHostConnecting 并清掉本状态）；
+     * UI 据此短暂显示「连接失败」，避免用户以为点击没有反馈。
+     */
+    val connectFailedAddress: StateFlow<String?> = _connectFailedAddress.asStateFlow()
+
     // ---- 以下 setter 供配对 / 传输逻辑与页面调用 ----
 
     fun setPinCode(pinCode: String?) {
@@ -78,5 +98,15 @@ class MainViewModel : ViewModel() {
     /** 更新「已连接 HID 对端」地址集合（HID bridge 推送 registry 快照）。 */
     fun setConnectedDeviceAddresses(addresses: Set<String>) {
         _connectedDeviceAddresses.value = addresses
+    }
+
+    /** 置位 / 清空「正在主动连接」的设备地址（null = 无进行中的连接）。 */
+    fun setConnectingDeviceAddress(address: String?) {
+        _connectingDeviceAddress.value = address
+    }
+
+    /** 置位 / 清空「主动连接下发失败」的设备地址。 */
+    fun setConnectFailedAddress(address: String?) {
+        _connectFailedAddress.value = address
     }
 }

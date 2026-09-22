@@ -15,6 +15,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketkeyboard.app.hid.HidUnavailableReason
 import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.MainViewModel
 import com.pocketkeyboard.app.ui.PairedDevice
@@ -60,6 +61,7 @@ class PairingScreenTest {
         viewModel: MainViewModel,
         connectedAddresses: Set<String> = emptySet(),
         removeBond: (suspend (String) -> com.pocketkeyboard.app.hid.BondRemoval)? = null,
+        hidController: com.pocketkeyboard.app.hid.HidController? = null,
     ) {
         viewModel.setConnectedDeviceAddresses(connectedAddresses)
         composeRule.setContent {
@@ -67,6 +69,7 @@ class PairingScreenTest {
                 PairingScreen(
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
+                    hidController = hidController,
                     removeBond = removeBond,
                 )
             }
@@ -324,6 +327,86 @@ class PairingScreenTest {
         assertEquals(WINDOWS_ADDRESS, viewModel.activeDevice.value?.address)
         // 展示以 DataStore 记录为准，而不是桥接写的探测值
         assertEquals(DevicePlatform.OTHER, viewModel.activeDevice.value?.platform)
+    }
+
+    // ------------------------------------------------------ A2 / 症状 1：连接状态可见
+
+    @Test
+    fun `selected row shows the active target badge right after clicking`() = runBlocking<Unit> {
+        clearPlatformStore()
+        DevicePlatformStore(context).set(APPLE_ADDRESS, DevicePlatform.APPLE)
+
+        val viewModel = viewModelWith(
+            PairedDevice(APPLE_ADDRESS, "测试 iPad", DevicePlatform.OTHER),
+        )
+        setScreen(viewModel)
+
+        composeRule.onNodeWithText("测试 iPad").performClick()
+        composeRule.waitForIdle()
+
+        // 症状 1：点击瞬间就要有可见反馈——「当前控制目标」小标立刻出现
+        composeRule.onNodeWithText("当前控制目标").assertExists()
+    }
+
+    @Test
+    fun `connecting and failed states render their own chips`() = runBlocking<Unit> {
+        clearPlatformStore()
+        DevicePlatformStore(context).set(APPLE_ADDRESS, DevicePlatform.APPLE)
+
+        val viewModel = viewModelWith(
+            PairedDevice(APPLE_ADDRESS, "测试 iPad", DevicePlatform.APPLE),
+        )
+        viewModel.setActiveDevice(PairedDevice(APPLE_ADDRESS, "测试 iPad", DevicePlatform.APPLE))
+        viewModel.setConnectingDeviceAddress(APPLE_ADDRESS)
+        setScreen(viewModel)
+
+        // 连接中：行内「连接中…」chip（同时保留「当前控制目标」）
+        composeRule.onNodeWithText("连接中…").assertExists()
+        composeRule.onNodeWithText("当前控制目标").assertExists()
+
+        // 连接失败：换成「连接失败」chip
+        viewModel.setConnectingDeviceAddress(null)
+        viewModel.setConnectFailedAddress(APPLE_ADDRESS)
+        composeRule.waitForIdle()
+
+        composeRule.onAllNodesWithText("连接中…").assertCountEquals(0)
+        composeRule.onNodeWithText("连接失败").assertExists()
+    }
+
+    @Test
+    fun `control status text reflects the active device connection state`() = runBlocking<Unit> {
+        clearPlatformStore()
+        val viewModel = viewModelWith(
+            PairedDevice(APPLE_ADDRESS, "测试 iPad", DevicePlatform.APPLE),
+        )
+        viewModel.setActiveDevice(PairedDevice(APPLE_ADDRESS, "测试 iPad", DevicePlatform.APPLE))
+        // 注意：setScreen 会用 connectedAddresses 参数覆盖 ViewModel 里的集合，
+        // 已连接状态必须通过参数传给页面
+        setScreen(viewModel, connectedAddresses = setOf(APPLE_ADDRESS))
+
+        // 已连接：状态文案说明可以开始控制（不再依赖灰 / 亮按钮传递状态）
+        composeRule.onNodeWithText("已连接，可以开始控制").assertExists()
+    }
+
+    @Test
+    fun `control status text prompts when nothing is selected`() = runBlocking<Unit> {
+        clearPlatformStore()
+        val viewModel = viewModelWith()
+        setScreen(viewModel)
+
+        composeRule.onNodeWithText("请先在上方已配对设备中选择一个设备").assertExists()
+    }
+
+    @Test
+    fun `unavailable reason banner is shown on the pairing page`() = runBlocking<Unit> {
+        clearPlatformStore()
+        val viewModel = viewModelWith()
+        // HidController 构造不发起任何蓝牙操作；这里只把 bridge 的不可用原因推到 UI
+        val controller = com.pocketkeyboard.app.hid.HidController(context, viewModel)
+        controller.bridge.onUnavailable(HidUnavailableReason.BLUETOOTH_OFF)
+        setScreen(viewModel, hidController = controller)
+
+        composeRule.onNodeWithText("蓝牙尚未开启，请打开系统蓝牙后重试。").assertExists()
     }
 
     private companion object {

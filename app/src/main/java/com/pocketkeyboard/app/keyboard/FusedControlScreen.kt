@@ -31,6 +31,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -74,6 +77,7 @@ import com.pocketkeyboard.app.trackpad.TrackpadMetrics
 import com.pocketkeyboard.app.trackpad.TrackpadThresholds
 import com.pocketkeyboard.app.trackpad.clickZones
 import com.pocketkeyboard.app.trackpad.trackpadGestures
+import com.pocketkeyboard.app.ui.AppMode
 import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.MainViewModel
 import com.pocketkeyboard.app.ui.PairedDevice
@@ -96,15 +100,29 @@ import kotlin.math.roundToInt
  * │           左  │  右                    │  ← 底部短竖线分割的左右点击区（仅 Windows 模式）
  * │         当前控制设备名                   │
  * ├───────────────────────────────────────┤  ← 居中淡出的细分隔线
- * │          点此唤起系统键盘（不可见输入框）  │  ← 系统输入法唤起区：BasicTextField
+ * │      键盘区：系统输入法唤起区（按 mode 变高矮）  │  ← 不可见 BasicTextField
  * ├───────────────────────────────────────┤  ← 居中淡出的细分隔线
  * │ ctrl shift fn win/⌘ alt tab esc        │  ← 可锁定修饰键排（点击锁定 / 再点解锁）
  * └───────────────────────────────────────┘
  * ```
  *
- * 竖屏下 KEYBOARD 与 TRACKPAD 两种 mode 都展示本页（五指收缩 / 张开照常切换 mode，
- * 但视觉不再变化，因为两边的布局已经融合）。横屏仍是全屏 87 键 TKL（[KeyboardScreen]）
- * 与全屏触控板（trackpad 包的 TrackpadScreen），本页不参与。
+ * 竖屏下 KEYBOARD 与 TRACKPAD 两种 mode 都展示本页，但**视觉必须可区分**（B4，见下）。
+ * 横屏仍是全屏 87 键 TKL（[KeyboardScreen]）与全屏触控板（trackpad 包的 TrackpadScreen），
+ * 本页不参与。
+ *
+ * ## 两个 mode 的视觉区分（B4，真机实测第三轮）
+ *
+ * 五指张开 → 键盘模式：键盘区权重增大（触控板区缩小）+ **自动弹出系统输入法**；
+ * 五指收缩 → 触控板模式：触控板区权重增大（键盘区缩成一条、只剩修饰键排）+ **收起系统输入法**。
+ * mode 切换本身仍走 `MainViewModel.mode` 与既有 HUD 文案（MainActivity 的
+ * `PocketGestureHandler`），本页只负责「mode 变了之后视觉与输入法怎么跟着变」。
+ *
+ * 权重定义见 [FusedLayout]，mode → 视觉 / 输入法的映射见 [fusedTrackpadWeight] 与
+ * [FusedImeInputArea]。
+ *
+ * @param mode 当前页面模式。**必须传 `AnimatedContent` 的 `currentMode`**（而不是直接读
+ *     `viewModel.mode`）：转场期间退场的那一页要保留自己的 mode，否则它会在退场动画里
+ *     重复触发新 mode 的输入法弹出 / 权重变化
  *
  * ## 为什么不再自己做 26 键 QWERTY（Bug 6）
  *
@@ -113,17 +131,6 @@ import kotlin.math.roundToInt
  * 放一个不可见的 `BasicTextField` 作为「文本入口」，用户点它弹出系统输入法，
  * 输入内容经 InputConnection 落到文本框后，由 [ImeTextDiff] 差分出「追加 / 删除」，
  * 再逐字符经 `HidUsageMapper` 映射成 HID usage 发给被控设备（输入框随即清空）。
- *
- * ## 尺寸分配策略
- *
- * - 触控板区占满剩余空间（`weight(1f)`）：它是「指向 / 滚动」的主战场，系统输入法
- *   弹出时（`Modifier.imePadding`）也是被压缩的对象，给它最大弹性；
- * - 输入区 [FusedMetrics.IME_INPUT_HEIGHT] 与修饰键排 [FusedMetrics.MODIFIER_ROW_HEIGHT]
- *   用固定高度：系统输入法弹出后它们必须完整落在输入法上方，固定高度不会随
- *   剩余空间变形；
- * - 修饰键排 7 颗等宽（ctrl / shift / fn / win-option / alt-cmd / tab / esc），
- *   键帽直接用键盘页的 [KeyCap]（渐变分隔细线 + 按压下陷 + 触觉 + ≥5 指针放行
- *   五指挥势层），与横屏 87 键同一套观感。
  *
  * ## 输入法弹出时的避让
  *
@@ -149,12 +156,20 @@ import kotlin.math.roundToInt
 @Composable
 fun FusedControlScreen(
     modifier: Modifier = Modifier,
+    mode: AppMode,
     viewModel: MainViewModel = viewModel(),
     arbiter: GestureArbiter = remember { GestureArbiter() },
     transport: HidTransport? = null,
 ) {
     val activeDevice by viewModel.activeDevice.collectAsStateWithLifecycle()
     val platform = activeDevice?.platform ?: DevicePlatform.OTHER
+
+    // 竖屏两种 mode 的视觉必须可区分（B4）：KEYBOARD / NUMPAD = 键盘模式——键盘区（系统
+    // 输入法唤起区）权重增大、自动弹出系统输入法；TRACKPAD = 触控板模式——触控板区权重
+    // 增大、键盘区缩到一条、系统输入法收起。五指收缩 / 张开切换的就是这个布尔量，
+    // 因此「张开看到键盘、收缩看到触控板」在竖屏同样成立（真机实测原两种 mode 视觉
+    // 完全相同，用户完全看不出模式切没切）。
+    val keyboardMode = mode == AppMode.KEYBOARD || mode == AppMode.NUMPAD
 
     val context = LocalContext.current
     val view = LocalView.current
@@ -303,14 +318,17 @@ fun FusedControlScreen(
                 onNumpadToggle = { numpadVisible = true },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    // B4：触控板区 / 键盘区的权重随 mode 变化——键盘模式键盘区更大
+                    // （配合弹出的系统输入法），触控板模式触控板区更大（键盘区缩成一条）
+                    .weight(fusedTrackpadWeight(keyboardMode)),
             )
             FusedImeInputArea(
                 onCommitChar = ::onImeCommit,
                 onBackspace = ::onImeBackspace,
+                keyboardMode = keyboardMode,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(FusedMetrics.IME_INPUT_HEIGHT),
+                    .weight(fusedKeyboardAreaWeight(keyboardMode)),
             )
             FusedModifierRow(
                 platform = platform,
@@ -344,14 +362,41 @@ fun FusedControlScreen(
 /** 融合页的尺寸常量（dp / 比例）。UI 布局与手势几何共用，避免两边算出的区域不一致。 */
 internal object FusedMetrics {
 
-    /**
-     * 系统输入法唤起区高度（固定值）：系统输入法弹出后该区域必须完整落在输入法
-     * 上方，用固定高度而不是 weight，避免随剩余空间变形。
-     */
-    val IME_INPUT_HEIGHT = 56.dp
-
-    /** 可锁定修饰键排高度（固定值，同上）。 */
+    /** 可锁定修饰键排高度（固定值：不随 mode 权重变化，两个 mode 下都可锁定修饰键）。 */
     val MODIFIER_ROW_HEIGHT = 64.dp
+}
+
+/**
+ * 触控板区在竖屏融合页 Column 里的权重（B4）。
+ *
+ * 键盘模式（[keyboardMode] = true，五指张开 / KEYBOARD / NUMPAD）：键盘区（系统输入法唤起区）
+ * 拿到主要高度，触控板区相应缩小——用户要做的是「打字」而不是「指向」，屏幕下半还有
+ * 弹出的系统输入法。触控板模式则反过来：触控板区拿到绝大部分高度，键盘区缩成一条
+ * （仅留修饰键排）。
+ */
+internal fun fusedTrackpadWeight(keyboardMode: Boolean): Float = when (keyboardMode) {
+    // 0.55 + 0.45 = 1：两个 weight 之和，余下高度全给固定高度的修饰键排
+    true -> FusedLayout.WEIGHT_TRACKPAD_KEYBOARD_MODE
+    false -> FusedLayout.WEIGHT_TRACKPAD_TRACKPAD_MODE
+}
+
+/** 键盘区（系统输入法唤起区）的权重，见 [fusedTrackpadWeight]。 */
+internal fun fusedKeyboardAreaWeight(keyboardMode: Boolean): Float = when (keyboardMode) {
+    true -> FusedLayout.WEIGHT_KEYBOARD_AREA_KEYBOARD_MODE
+    false -> FusedLayout.WEIGHT_KEYBOARD_AREA_TRACKPAD_MODE
+}
+
+/**
+ * 竖屏融合页两个 mode 的布局权重（B4，单测覆盖）。
+ *
+ * 权重之和必须为 1（Column 里与固定高度的修饰键排共同分完剩余高度），且两个 mode
+ * **必须**不同——这是「竖屏两个 mode 视觉可区分」的结构性保证。
+ */
+internal object FusedLayout {
+    const val WEIGHT_TRACKPAD_KEYBOARD_MODE = 0.45f
+    const val WEIGHT_KEYBOARD_AREA_KEYBOARD_MODE = 0.55f
+    const val WEIGHT_TRACKPAD_TRACKPAD_MODE = 0.82f
+    const val WEIGHT_KEYBOARD_AREA_TRACKPAD_MODE = 0.18f
 }
 
 /**
@@ -517,14 +562,17 @@ private fun FusedDeviceNameStrip(
  *
  * ## 弹出 / 收起
  *
- * - 弹出：输入框聚焦即由系统弹出输入法（Compose 默认行为），同时
- *   [LocalSoftwareKeyboardController].show() 兜底（点提示区域等聚焦边缘场景）；
- * - 收起：离开本页（切模式 / 切页）时 `clearFocus()` + `hide()`，输入法不会
- *   留在屏幕上盖住下一个页面；
- * - **五指挥势联动收起（问题 3a / 3b）**：系统键盘弹出后屏幕下半是 IME 窗口，落在
+ * - **键盘模式自动弹出**（B4）：[keyboardMode] 为 true（五指张开切到 KEYBOARD / NUMPAD，
+ *   或 dock 直接选了键盘）时自动取得焦点并唤起系统输入法——「键盘模式」本来就要打字，
+ *   不应该还要用户先点一下唤起区；
+ * - **触控板模式收起**：切到 TRACKPAD（五指收缩）时 `clearFocus()` + `hide()`，
+ *   并把空间让给触控板区（见 [fusedTrackpadWeight]）；
+ * - **五指挥势联动收起（问题 3a / 3b，保留）**：系统键盘弹出后屏幕下半是 IME 窗口，落在
  *   它上面的手指到不了 App 的五指挥势层，5 指永远凑不齐。因此本区订阅
  *   [LocalFiveFingerGate]，一出现五指挥势意图就立刻 `clearFocus()` + `hide()`
  *   让出整块屏幕；同时 `clickable` 的门控保证「5 指按下时绝不聚焦弹键盘」。
+ *   协调顺序：**意图确立先收，判定结果（张开 / 收缩）出来再决定是否弹出**——
+ *   所以收起条件（`shouldYieldToFiveFinger`）优先于自动弹出条件（`keyboardMode`）。
  *
  * ## 光标与手柄为什么整框不可绘（问题 4）
  *
@@ -536,11 +584,13 @@ private fun FusedDeviceNameStrip(
  *
  * @param onCommitChar 提交了一个字符（调用方负责 fn 组合、修饰键叠加与 HID 映射）
  * @param onBackspace 文本缩短了 N 个字符（调用方补发 N 次退格）
+ * @param keyboardMode 当前是否键盘模式（KEYBOARD / NUMPAD）：决定是否自动弹出系统输入法
  */
 @Composable
 private fun FusedImeInputArea(
     onCommitChar: (Char) -> Unit,
     onBackspace: (Int) -> Unit,
+    keyboardMode: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val focusManager = LocalFocusManager.current
@@ -551,10 +601,23 @@ private fun FusedImeInputArea(
     // 五指挥意图闸门：出现五指意图就收起系统输入法，把屏幕让给手势层
     val fiveFingerGate = LocalFiveFingerGate.current
     val yieldToFiveFinger = fiveFingerGate.shouldYieldToFiveFinger
-    LaunchedEffect(yieldToFiveFinger) {
-        if (yieldToFiveFinger) {
-            focusManager.clearFocus()
-            keyboardController?.hide()
+    LaunchedEffect(yieldToFiveFinger, keyboardMode) {
+        when {
+            // ① 意图确立先收：5 指手势期间绝不让输入法占着屏幕下半（否则手指到不了手势层）
+            yieldToFiveFinger -> {
+                focusManager.clearFocus()
+                keyboardController?.hide()
+            }
+            // ② 键盘模式自动弹：判定结果是张开（或用户直接选了键盘模式）就弹出
+            keyboardMode -> {
+                focusRequester.requestFocus()
+                keyboardController?.show()
+            }
+            // ③ 触控板模式收起：判定结果是收缩，或者用户直接切到了触控板模式
+            else -> {
+                focusManager.clearFocus()
+                keyboardController?.hide()
+            }
         }
     }
 
@@ -566,6 +629,9 @@ private fun FusedImeInputArea(
     // 这样拼音中间态既不会被打给对端，也不会被误判成「删除」
     var lastCommitted by remember { mutableStateOf(IME_SENTINEL) }
     var focused by remember { mutableStateOf(false) }
+    // 批量上屏的节拍发送队列（串行化，见 onValueChange 里的说明）
+    val scope = rememberCoroutineScope()
+    var sendJob by remember { mutableStateOf<Job?>(null) }
 
     Column(modifier = modifier.fillMaxWidth()) {
         FusedSectionSeam()
@@ -619,10 +685,26 @@ private fun FusedImeInputArea(
                                 text = IME_SENTINEL,
                                 selection = TextRange(IME_SENTINEL.length),
                             )
-                            actions.forEach { action ->
+                            val dispatch: (ImeKeyAction) -> Unit = { action ->
                                 when (action) {
                                     is ImeKeyAction.Backspace -> onBackspace(action.count)
                                     is ImeKeyAction.Commit -> onCommitChar(action.char)
+                                }
+                            }
+                            if (actions.size <= 1) {
+                                // 单字符（真人打字节奏）：同步直发，零额外延迟
+                                actions.forEach(dispatch)
+                            } else {
+                                // 批量上屏（输入法整词提交 / 粘贴）：按节拍排队发送。
+                                // 实测 macOS HID 对毫秒级连发会丢键（6 键 / 160ms 只到 3 键），
+                                // 逐键间隔 KEY_BURST_SPACING_MS 后全部送达；串行化保证
+                                // 两次批量上屏不交错
+                                sendJob = scope.launch {
+                                    sendJob?.join()
+                                    actions.forEach { action ->
+                                        dispatch(action)
+                                        delay(KEY_BURST_SPACING_MS)
+                                    }
                                 }
                             }
                         },
@@ -668,6 +750,9 @@ private fun FusedImeInputArea(
 
 /** 零宽空格哨兵：输入框里恒定保留的不可见字符（退格捕获，见 [FusedImeInputArea] 说明）。 */
 private const val IME_SENTINEL = "\u200B"
+
+/** 批量上屏的键间隔（ms）：macOS HID 对毫秒级连发会丢键，逐键留出解析余量。 */
+private const val KEY_BURST_SPACING_MS = 12L
 
 /** 融合页顶部分隔线：居中淡出的 1dp 细线（触控板 / 输入区 / 修饰键排三段之分界）。 */
 @Composable

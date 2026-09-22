@@ -342,8 +342,11 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
                         )
 
                         // 竖屏：两种 mode 都是融合布局（触控板 + 系统输入法唤起区 +
-                        // 可锁定修饰键排），mode 状态照常切换，只是视觉不再变化——
-                        // 五指收缩 / 张开在竖屏已无页面可切
+                        // 可锁定修饰键排），mode 状态照常切换；两个 mode 的视觉可区分、
+                        // 系统输入法与权重随 mode 联动（B4，见 FusedControlScreen）。
+                        // 传 AnimatedContent 的 currentMode 而不是 viewModel.mode：
+                        // 退场中的那一页要保留自己的 mode，否则转场期间它会重复触发
+                        // 新 mode 的输入法弹出 / 权重变化
                         AppMode.KEYBOARD, AppMode.NUMPAD ->
                             if (landscape) {
                                 KeyboardScreen(
@@ -354,6 +357,7 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
                             } else {
                                 FusedControlScreen(
                                     modifier = Modifier.fillMaxSize(),
+                                    mode = currentMode,
                                     viewModel = viewModel,
                                     arbiter = arbiter,
                                     transport = hidController.transport,
@@ -377,6 +381,7 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
                             } else {
                                 FusedControlScreen(
                                     modifier = Modifier.fillMaxSize(),
+                                    mode = currentMode,
                                     viewModel = viewModel,
                                     arbiter = arbiter,
                                     transport = hidController.transport,

@@ -113,6 +113,22 @@ interface HidStatusListener {
     fun onHostDisconnected(address: String) {}
 
     /**
+     * 正在**主动**连接某个主机（设备侧发起 HID L2CAP，Bug A2）。
+     *
+     * 与 [onReconnecting] 的区别：本回调覆盖一切「我方发起连接」的路径
+     * （点设备行 / 注册后自动连接 / 退避重试），UI 据此把设备行切成「连接中…」。
+     */
+    fun onHostConnecting(address: String) {}
+
+    /**
+     * 主动连接下发失败（`BluetoothHidDevice.connect` 返回 false，Bug A2）。
+     *
+     * 只表示「命令没下发成功」；底层仍会按 [ReconnectPolicy] 退避重试
+     * （每次重试都会再走一次 [onHostConnecting]）。UI 可显示「连接失败」。
+     */
+    fun onHostConnectFailed(address: String) {}
+
+    /**
      * 当前已连接 HID 对端地址集合变化（Bug 2b：配对页据此显示「已连接」标识）。
      *
      * 与 [onHostConnected] / [onHostDisconnected] 的区别：这两个回调是「事件」，

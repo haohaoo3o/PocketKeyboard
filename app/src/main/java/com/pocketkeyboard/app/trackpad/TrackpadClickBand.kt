@@ -124,11 +124,15 @@ fun TrackpadClickZone(
                         onRelease()
                     },
                     onAbandoned = {
-                        // 按下指针数达到 5：本次按下被判定为五指挥势，作废并补发松键。
-                        // 门控期间若已激活过，这里补发的松键是必要的兜底
+                        // 按下指针数达到 5 / 闸门报出五指意图：本次按下被判定为五指挥势，
+                        // 作废并补发松键。门控期间若已激活过，这里补发的松键是必要的兜底
                         abandoned = true
                         pressed = false
                         onRelease()
+                    },
+                    onCancelled = {
+                        // 手势被系统取消（ACTION_CANCEL）时的兜底：撤销视觉下陷
+                        pressed = false
                     },
                 ),
             ),
