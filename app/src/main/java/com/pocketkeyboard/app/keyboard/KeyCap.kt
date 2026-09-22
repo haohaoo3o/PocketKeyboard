@@ -177,9 +177,15 @@ fun KeyCap(
             )
             .pocketKeyGestures(
                 handler = PocketKeyGestureHandler(
-                    onPress = {
+                    onTouchDown = {
+                        // 视觉按下：立刻生效，不受五指防误触门控影响（门控只推迟
+                        // 真正的激活）。5 指手势里这颗键会被作废，下陷动画随之回弹
                         pressed = true
                         abandoned = false
+                    },
+                    onPress = {
+                        // 真正激活（发 HID 报告 / 触发本机功能）。这之前还有一道
+                        // 「五指防误触门控」——5 指凑齐时整颗键作废，不会走到这里
                         onPress()
                     },
                     onRelease = {
@@ -187,7 +193,8 @@ fun KeyCap(
                         onRelease()
                     },
                     onAbandoned = {
-                        // 按下指针数达到 5：本次按下被判定为五指挥势，作废按键
+                        // 按下指针数达到 5：本次按下被判定为五指挥势，作废按键。
+                        // 门控期间从未调用过 onPress，因此这里不需要补发松键
                         abandoned = true
                         pressed = false
                         onAbandoned()
@@ -318,7 +325,10 @@ fun MediaIconGlyph(
         contentDescription = contentDescription.orEmpty(),
         onDraw = {
             val unit = min(size.width, size.height) / ICON_VIEWPORT
-            scale(scaleX = unit, scaleY = unit, pivot = center) {
+            // pivot 必须是 Offset.Zero：DrawScope.scale 默认绕画布中心缩放，
+            // 会把 [0, ICON_VIEWPORT] 视口坐标整体推出画布（F 行图标只剩碎片），
+            // 与 PairingScreen.drawPlatformIconPath 同类问题
+            scale(scaleX = unit, scaleY = unit, pivot = Offset.Zero) {
                 when (icon) {
                     KeyIcon.VOLUME_UP -> drawSpeaker(color, waves = 2)
                     KeyIcon.VOLUME_DOWN -> drawSpeaker(color, waves = 1)

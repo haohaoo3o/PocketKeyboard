@@ -182,6 +182,18 @@ object HidUsage {
     const val CONSUMER_EJECT = 0x00B8
 
     /**
+     * Consumer：AC Fast Forward（快进）。
+     *
+     * 取值依据：Consumer Page (0x0C) 0xB3 = Fast Forward、0xB4 = Rewind
+     * （与 FreeBSD `share/misc/usb_hid_usages` 逐条核对，注意 0xB3/0xB4 的顺序是
+     * 「快进在前、后退在后」，与部分中文资料的写法相反）。
+     */
+    const val CONSUMER_AC_FAST_FORWARD = 0x00B3
+
+    /** Consumer：AC Rewind（后退 / 快退）。 */
+    const val CONSUMER_AC_REWIND = 0x00B4
+
+    /**
      * Consumer：Display Brightness Increment（亮度增大）。
      *
      * 平台差异（重要，写在这里供键盘页查阅）：

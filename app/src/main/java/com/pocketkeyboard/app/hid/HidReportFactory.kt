@@ -37,8 +37,14 @@ object HidReportFactory {
     /** 单次最多同时按下的普通按键数（6-key rollover）。 */
     const val MAX_KEYS_PER_REPORT = 6
 
-    /** 报告键阵列允许的最大 usage（见 [HidReportDescriptor] 的 Usage Maximum）。 */
-    const val MAX_KEY_USAGE = 0xC7
+    /**
+     * 报告键阵列允许的最大 usage（见 [HidReportDescriptor] 的 Usage Maximum）。
+     *
+     * 取 0xFF（Keyboard/Keypad Page 0x07 全范围）而不是原先的 0xC7：小键盘扩展键
+     * `Keypad +/-` 的 usage 是 0xD7，先前的上限会把它静默丢掉（[normalizeKeys] 过滤 +
+     * 描述符 Usage Maximum 双重拦截），数字小键盘的「+/-」键在真机上按不出任何字符。
+     */
+    const val MAX_KEY_USAGE = 0xFF
 
     /** 相对位移 / 滚轮单字节范围。 */
     const val AXIS_MIN = -127

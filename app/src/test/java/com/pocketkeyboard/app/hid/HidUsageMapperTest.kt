@@ -161,6 +161,11 @@ class HidUsageMapperTest {
             .forEach { usage ->
                 assertTrue("usage 0x${usage.toString(16)} out of range", usage in 0x04..max)
             }
+        // NUMPAD_KEYS 也要过同一道检查：小键盘扩展键「+/-」是 usage 0xD7，
+        // 曾经因为描述符上限停在 0xC7 而被静默丢弃（既发不出去、主机也解析不了）
+        HidUsageMapper.NUMPAD_KEYS.values.forEach { usage ->
+            assertTrue("numpad usage 0x${usage.toString(16)} out of range", usage in 0x04..max)
+        }
         // 反过来：修饰键必须一个不少地都在映射表里（位图才能覆盖左右两侧）
         HidModifier.USAGE_TO_BIT.keys.forEach { modifier ->
             assertTrue(

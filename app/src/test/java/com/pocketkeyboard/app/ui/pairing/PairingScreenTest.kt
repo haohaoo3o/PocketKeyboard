@@ -59,7 +59,7 @@ class PairingScreenTest {
     private fun setScreen(
         viewModel: MainViewModel,
         connectedAddresses: Set<String> = emptySet(),
-        removeBond: ((String) -> Boolean)? = null,
+        removeBond: (suspend (String) -> com.pocketkeyboard.app.hid.BondRemoval)? = null,
     ) {
         viewModel.setConnectedDeviceAddresses(connectedAddresses)
         composeRule.setContent {
@@ -206,7 +206,7 @@ class PairingScreenTest {
         val removed = mutableListOf<String>()
         setScreen(viewModel, removeBond = { address ->
             removed.add(address)
-            true
+            com.pocketkeyboard.app.hid.BondRemoval.Removed
         })
 
         // 左滑露出删除操作
@@ -219,8 +219,12 @@ class PairingScreenTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithText("解除配对？").assertIsDisplayed()
 
-        // 确认删除：removeBond 被调用、设备从列表消失、DataStore 平台记录被清掉
+        // 确认删除：removeBond 被调用、设备从列表消失、DataStore 平台记录被清掉。
+        // 删除流程是挂起的（等 bond 广播确认），因此用 waitUntil 等列表真的更新
         composeRule.onNodeWithText("解除配对").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("待删除的设备").fetchSemanticsNodes().isEmpty()
+        }
         composeRule.waitForIdle()
 
         assertEquals(listOf(DELETE_ADDRESS), removed)
@@ -240,7 +244,7 @@ class PairingScreenTest {
         val removed = mutableListOf<String>()
         setScreen(viewModel, removeBond = { address ->
             removed.add(address)
-            true
+            com.pocketkeyboard.app.hid.BondRemoval.Removed
         })
 
         swipeLeftOn("待删除的设备")
@@ -262,7 +266,14 @@ class PairingScreenTest {
         val viewModel = viewModelWith(
             PairedDevice(DELETE_ADDRESS, "待删除的设备", DevicePlatform.OTHER),
         )
-        setScreen(viewModel, removeBond = { false })
+        // Bug 2a：反射返回 false 不再直接判定失败，但**广播确认后**设备仍在 bonded
+        // （真正失败）时必须提示失败并保留设备
+        setScreen(
+            viewModel,
+            removeBond = {
+                com.pocketkeyboard.app.hid.BondRemoval.Failed("bond still present")
+            },
+        )
 
         swipeLeftOn("待删除的设备")
         composeRule.waitForIdle()
@@ -291,6 +302,28 @@ class PairingScreenTest {
         assertEquals(APPLE_ADDRESS, viewModel.activeDevice.value?.address)
         // 展示以 DataStore 为准：ViewModel 里的探测值是 OTHER，点完应被纠正成 APPLE
         assertEquals(DevicePlatform.APPLE, viewModel.activeDevice.value?.platform)
+    }
+
+    @Test
+    fun `clicking another confirmed device switches the active target`() = runBlocking<Unit> {
+        clearPlatformStore()
+        DevicePlatformStore(context).set(APPLE_ADDRESS, DevicePlatform.APPLE)
+        DevicePlatformStore(context).set(WINDOWS_ADDRESS, DevicePlatform.OTHER)
+
+        val viewModel = viewModelWith(
+            PairedDevice(APPLE_ADDRESS, "测试 iPad", DevicePlatform.APPLE),
+            PairedDevice(WINDOWS_ADDRESS, "测试 Windows", DevicePlatform.OTHER),
+        )
+        viewModel.setActiveDevice(PairedDevice(APPLE_ADDRESS, "测试 iPad", DevicePlatform.APPLE))
+        setScreen(viewModel)
+
+        // Bug 2c：点已确认的另一台设备 → 控制目标切换（而不是「没反应」）
+        composeRule.onNodeWithText("测试 Windows").performClick()
+        composeRule.waitForIdle()
+
+        assertEquals(WINDOWS_ADDRESS, viewModel.activeDevice.value?.address)
+        // 展示以 DataStore 记录为准，而不是桥接写的探测值
+        assertEquals(DevicePlatform.OTHER, viewModel.activeDevice.value?.platform)
     }
 
     private companion object {

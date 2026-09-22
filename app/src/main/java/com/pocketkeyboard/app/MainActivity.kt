@@ -36,6 +36,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -61,8 +62,10 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketkeyboard.app.gesture.AppleSpring
+import com.pocketkeyboard.app.gesture.FiveFingerGate
 import com.pocketkeyboard.app.gesture.GestureArbiter
 import com.pocketkeyboard.app.gesture.GestureConstants
+import com.pocketkeyboard.app.gesture.LocalFiveFingerGate
 import com.pocketkeyboard.app.gesture.GestureFeedback
 import com.pocketkeyboard.app.gesture.PocketGestureHandler
 import com.pocketkeyboard.app.gesture.applePageTransitionSpec
@@ -79,6 +82,7 @@ import com.pocketkeyboard.app.ui.icon.ModeIcons
 import com.pocketkeyboard.app.ui.pairing.PairingScreen
 import com.pocketkeyboard.app.ui.theme.PocketKeyboardTheme
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 /**
  * 应用唯一 Activity：Compose 页面容器。
@@ -159,6 +163,11 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
     // 手势视觉反馈（HUD 文字提示 + 设备切换覆盖式转场）
     val hudState = rememberGestureHudState()
 
+    // 五指挥意图闸门：手势协程在凑指窗口里看到 ≥3 指时置位，页面 UI 层据此
+    // ① 主动收起系统输入法（否则屏幕下半被 IME 占着，5 指永远凑不齐——真机实测主因）
+    // ② 键入区拒绝聚焦弹键盘
+    val fiveFingerGate = remember { FiveFingerGate() }
+
     // 手势仲裁器：同一个实例同时交给最底层的五指挥势层和触控板层，
     // 否则「60ms 内凑满 5 指归五指层」这条规则无从生效
     val arbiter = remember { GestureArbiter() }
@@ -233,6 +242,12 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
                     hudState.showDeviceSwitch(deviceSwitchedHud.format(next.name))
                 }
             },
+            // 凑指窗口内出现 ≥3 指 → 有五指挥势意图：闸门置位，页面据此收起
+            // 系统输入法、停止激活按键。（5 指凑齐那一刻闸门同样会置位，
+            // 见 pocketGestures 内部对 claimFiveFinger 的调用点）
+            onIntent = { count ->
+                fiveFingerGate.observeGather(fingerCount = count, claimed = false)
+            },
         )
     }
 
@@ -246,11 +261,22 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
     // 规则（纯函数部分见 [dockVisibleFor]，单测覆盖）：
     // - 配对页常显；
     // - 键盘 / 触控板页默认隐藏，仅「单指边缘内滑」临时唤出；
-    // - 切换页面模式后立刻复位 → dock 再次自动隐藏（产品需求原文）。
+    // - 切换页面模式后立刻复位 → dock 再次自动隐藏（产品需求原文）；
+    // - **唤出后 5 秒无操作自动收起**（问题 5）：激活只是「临时请出来看一眼」，
+    //   不能一直占着底部空间、也不能一直挡着五指挥势。期间每次交互续期。
     var dockEdgeActivated by remember { mutableStateOf(false) }
     LaunchedEffect(mode) {
         // mode 一变（点 dock 项 / 五指挥势切模式 / 五指横滑不改 mode 不触发）就收回激活态
         dockEdgeActivated = false
+    }
+    // 每次与 dock 交互都把 5 秒倒计时**重新开始**（顺延）。用一个自增计数做 key：
+    // LaunchedEffect 一被重新求值就取消旧的倒计时、从零开始，不需要手动 cancel。
+    var dockInteractionTick by remember { mutableStateOf(0) }
+    LaunchedEffect(dockEdgeActivated, dockInteractionTick) {
+        if (dockEdgeActivated) {
+            delay(GestureConstants.DOCK_AUTO_HIDE_MS)
+            dockEdgeActivated = false
+        }
     }
     val dockVisible = dockVisibleFor(mode, dockEdgeActivated)
 
@@ -274,89 +300,101 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                // dock 隐藏时让出系统手势条：键盘最底行 / 触控区也不会被导航栏盖住
-                .navigationBarsPadding()
-                // 五指挥势层：挂在页面容器最底层，键盘层 / 触控板层作为子节点与之共存
-                .pocketGestures(handler = gestureHandler, arbiter = arbiter)
-                // 侧滑激活 dock：只在 dock 隐藏时挂载；配对页 dock 常显，无需激活
-                .edgeSwipeToShowDock(
-                    enabled = !dockVisible,
-                    onActivate = { dockEdgeActivated = true },
-                ),
-        ) {
-            AnimatedContent(
-                targetState = mode,
-                modifier = Modifier.fillMaxSize(),
-                // 苹果式 spring 推拉转场（stiffness = MediumLow）
-                transitionSpec = applePageTransitionSpec(),
-                label = "page",
-            ) { currentMode ->
-                when (currentMode) {
-                    AppMode.PAIRING -> PairingScreen(
-                        // 需求 1：配对页根部预留状态栏 / 刘海空间。配对页归配对工程师，
-                        // 这里在调用点包一层（insets 会被消费，页面内部即使也做避让
-                        // 也不会双重留白），edge-to-edge 保留
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .statusBarsPadding()
-                            .displayCutoutPadding(),
-                        viewModel = viewModel,
-                        hidController = hidController,
+        // 五指挥意图闸门下发给整棵页面树：融合页的输入法唤起区据此收起系统键盘 /
+        // 拒绝聚焦，触控板页与键盘页无需消费它。
+        CompositionLocalProvider(LocalFiveFingerGate provides fiveFingerGate) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // dock 隐藏时让出系统手势条：键盘最底行 / 触控区也不会被导航栏盖住
+                    .navigationBarsPadding()
+                    // 五指挥势层：挂在页面容器最底层，键盘层 / 触控板层作为子节点与之共存。
+                    // gate 让页面 UI 层读到「是否该让位给五指挥势」（收起系统输入法、停止激活按键）
+                    .pocketGestures(
+                        handler = gestureHandler,
+                        arbiter = arbiter,
+                        gate = fiveFingerGate,
                     )
+                    // 侧滑激活 dock：只在 dock 隐藏时挂载；配对页 dock 常显，无需激活
+                    .edgeSwipeToShowDock(
+                        enabled = !dockVisible,
+                        onActivate = { dockEdgeActivated = true },
+                    ),
+            ) {
+                AnimatedContent(
+                    targetState = mode,
+                    modifier = Modifier.fillMaxSize(),
+                    // 苹果式 spring 推拉转场（stiffness = MediumLow）
+                    transitionSpec = applePageTransitionSpec(),
+                    label = "page",
+                ) { currentMode ->
+                    when (currentMode) {
+                        AppMode.PAIRING -> PairingScreen(
+                            // 需求 1：配对页根部预留状态栏 / 刘海空间。配对页归配对工程师，
+                            // 这里在调用点包一层（insets 会被消费，页面内部即使也做避让
+                            // 也不会双重留白），edge-to-edge 保留
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .statusBarsPadding()
+                                .displayCutoutPadding(),
+                            viewModel = viewModel,
+                            hidController = hidController,
+                        )
 
-                    // 竖屏：两种 mode 都是融合布局（触控板 + 系统输入法唤起区 +
-                    // 可锁定修饰键排），mode 状态照常切换，只是视觉不再变化——
-                    // 五指收缩 / 张开在竖屏已无页面可切
-                    AppMode.KEYBOARD, AppMode.NUMPAD ->
-                        if (landscape) {
-                            KeyboardScreen(
-                                modifier = Modifier.fillMaxSize(),
-                                viewModel = viewModel,
-                                transport = hidController.transport,
-                            )
-                        } else {
-                            FusedControlScreen(
-                                modifier = Modifier.fillMaxSize(),
-                                viewModel = viewModel,
-                                arbiter = arbiter,
-                                transport = hidController.transport,
-                            )
-                        }
+                        // 竖屏：两种 mode 都是融合布局（触控板 + 系统输入法唤起区 +
+                        // 可锁定修饰键排），mode 状态照常切换，只是视觉不再变化——
+                        // 五指收缩 / 张开在竖屏已无页面可切
+                        AppMode.KEYBOARD, AppMode.NUMPAD ->
+                            if (landscape) {
+                                KeyboardScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    viewModel = viewModel,
+                                    transport = hidController.transport,
+                                )
+                            } else {
+                                FusedControlScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    viewModel = viewModel,
+                                    arbiter = arbiter,
+                                    transport = hidController.transport,
+                                )
+                            }
 
-                    // 横屏：全屏触控板（TrackpadScreen 自带完整手势层与按键模拟区）
-                    AppMode.TRACKPAD ->
-                        if (landscape) {
-                            TrackpadScreen(
-                                // 需求 1：触控板页根部预留状态栏 / 刘海空间（同配对页，
-                                // 在调用点包一层，不动 trackpad 包代码）
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .statusBarsPadding()
-                                    .displayCutoutPadding(),
-                                viewModel = viewModel,
-                                arbiter = arbiter,
-                                transport = hidController.transport,
-                            )
-                        } else {
-                            FusedControlScreen(
-                                modifier = Modifier.fillMaxSize(),
-                                viewModel = viewModel,
-                                arbiter = arbiter,
-                                transport = hidController.transport,
-                            )
-                        }
+                        // 横屏：全屏触控板（TrackpadScreen 自带完整手势层与按键模拟区）
+                        AppMode.TRACKPAD ->
+                            if (landscape) {
+                                TrackpadScreen(
+                                    // 需求 1：触控板页根部预留状态栏 / 刘海空间（同配对页，
+                                    // 在调用点包一层，不动 trackpad 包代码）
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .statusBarsPadding()
+                                        .displayCutoutPadding(),
+                                    viewModel = viewModel,
+                                    arbiter = arbiter,
+                                    transport = hidController.transport,
+                                )
+                            } else {
+                                FusedControlScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    viewModel = viewModel,
+                                    arbiter = arbiter,
+                                    transport = hidController.transport,
+                                )
+                            }
+                    }
                 }
-            }
 
-            // HUD 与设备切换覆盖层：画在最上层，但不加 pointerInput，对触摸完全透明
-            GestureFeedback(state = hudState)
+                // HUD 与设备切换覆盖层：画在最上层，但不加 pointerInput，对触摸完全透明
+                GestureFeedback(state = hudState)
+            }
         }
 
         // dock 覆盖层：贴在内容之上（不挤占页面空间），以苹果式 spring 从底部滑入 / 滑出。
-        // 滑出由 mode 变化触发（LaunchedEffect 复位 dockEdgeActivated）。
+        // 滑出由 mode 变化触发（LaunchedEffect(mode) 复位 dockEdgeActivated），
+        // 或 5 秒无操作自动触发（LaunchedEffect(dockEdgeActivated, dockInteractionTick)）。
+        // 覆盖层自身**不消费触摸**（只做倒计时顺延），因此它可见时五指挥势照常能从
+        // 整块屏幕上识别——dock 不会成为五指挥势的拦截者。
         AnimatedVisibility(
             visible = dockVisible,
             modifier = Modifier.align(Alignment.BottomCenter),
@@ -368,6 +406,8 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
             ModeSwitcher(
                 currentMode = mode,
                 onModeSelected = viewModel::setMode,
+                // 每次与 dock 交互都顺延 5 秒
+                onInteract = { dockInteractionTick++ },
             )
         }
     }
@@ -649,13 +689,24 @@ private fun hasBluetoothPermissions(context: Context): Boolean {
 private fun ModeSwitcher(
     currentMode: AppMode,
     onModeSelected: (AppMode) -> Unit,
+    onInteract: () -> Unit = {},
 ) {
     data class ModeItem(val mode: AppMode, val labelRes: Int, val icon: ImageVector)
 
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.onSurface,
+    // 「与 dock 交互」的观察层：只读不消费，因此点击照常传给 NavigationBarItem。
+    // 挂在覆盖层根部而不是覆盖层外面：dock 收起（退出动画期间）也能继续顺延倒计时
+    Box(
+        modifier = Modifier.pointerInput(Unit) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                onInteract()
+            }
+        },
     ) {
+        NavigationBar(
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ) {
         val items = listOf(
             ModeItem(AppMode.PAIRING, R.string.mode_pairing, ModeIcons.Pairing),
             ModeItem(AppMode.KEYBOARD, R.string.mode_keyboard, ModeIcons.Keyboard),
@@ -672,7 +723,10 @@ private fun ModeSwitcher(
             }
             NavigationBarItem(
                 selected = selected,
-                onClick = { onModeSelected(item.mode) },
+                onClick = {
+                    onInteract()
+                    onModeSelected(item.mode)
+                },
                 icon = {
                     Icon(
                         imageVector = item.icon,
@@ -688,6 +742,7 @@ private fun ModeSwitcher(
                     unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ),
             )
+        }
         }
     }
 }

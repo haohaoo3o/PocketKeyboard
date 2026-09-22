@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
+import com.pocketkeyboard.app.gesture.GestureConstants
 import com.pocketkeyboard.app.gesture.PocketKeyGestureHandler
 import com.pocketkeyboard.app.gesture.pocketKeyGestures
 import com.pocketkeyboard.app.keyboard.performKeyHaptic
@@ -106,10 +107,15 @@ fun TrackpadClickZone(
             .background(if (pressedNow) ClickZonePressedBackground else PureBlack)
             .then(if (pressedNow) Modifier.clickZoneSunkenEdges() else Modifier)
             .pocketKeyGestures(
+                // 鼠标左右键不是字符键，误触代价低，但「按住拖动」对按下延迟敏感，
+                // 因此门控比字符键短（见 GestureConstants.KEY_PRESS_FIVE_FINGER_GUARD_MS 的取舍说明）
+                pressGuardMs = GestureConstants.CLICK_ZONE_PRESS_GUARD_MS,
                 handler = PocketKeyGestureHandler(
-                    onPress = {
+                    onTouchDown = {
                         pressed = true
                         abandoned = false
+                    },
+                    onPress = {
                         performKeyHaptic(view, vibrator)
                         onPress()
                     },
@@ -118,7 +124,8 @@ fun TrackpadClickZone(
                         onRelease()
                     },
                     onAbandoned = {
-                        // 按下指针数达到 5：本次按下被判定为五指挥势，作废并补发松键
+                        // 按下指针数达到 5：本次按下被判定为五指挥势，作废并补发松键。
+                        // 门控期间若已激活过，这里补发的松键是必要的兜底
                         abandoned = true
                         pressed = false
                         onRelease()

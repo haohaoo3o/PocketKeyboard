@@ -80,12 +80,14 @@ class HidReportDescriptorTest {
 
     @Test
     fun `keyboard key array covers 87 keys plus numpad extensions`() {
-        val index = indexOf(bytes(0x05, 0x07, 0x15, 0x00, 0x25, 0xC7))
-        assertTrue("key array range 0x00-0xC7 not found", index >= 0)
+        // 上限 0xFF：键盘/小键盘页全范围（含 Keypad +/- 0xD7 等小键盘扩展键）。
+        // 曾经用 0xC7，导致 NUMPAD 布局的「+/-」既发不出去也解析不了。
+        val index = indexOf(bytes(0x05, 0x07, 0x15, 0x00, 0x25, 0xFF))
+        assertTrue("key array range 0x00-0xFF not found", index >= 0)
         assertSubArrayAt(
             bytes(
                 0x19, 0x00, // Usage Minimum (Reserved / no event)
-                0x29, 0xC7, // Usage Maximum (0xC7)
+                0x29, 0xFF, // Usage Maximum (0xFF)
                 0x75, 0x08, // Report Size (8)
                 0x95, 0x06, // Report Count (6) -> 6-key rollover
                 0x81, 0x00, // Input (Data, Array, Abs)

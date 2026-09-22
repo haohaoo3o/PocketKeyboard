@@ -14,9 +14,10 @@ package com.pocketkeyboard.app.hid
  *    鼠标报告（ID 3）是标准 4 字节 `[buttons, X, Y, wheel]`。
  *    若主机切到 Boot Protocol，只会使用这两个报告的布局；Report ID 5 是纯扩展，
  *    仅在 Report Protocol 下被解析（主机忽略它即退化为「只有垂直滚轮」）。
- * 4. **键阵列范围 0x00–0xC7**：覆盖 87 键 TKL 全部按键 + 方向键 + F1–F24 + 小键盘
+ * 4. **键阵列范围 0x00–0xFF**：覆盖 87 键 TKL 全部按键 + 方向键 + F1–F24 + 小键盘
  *    （含小键盘「00」0xB0、「000」0xB1、「%」0xC4、「(」「)」0xB6/0xB7、「+/-」0xD7 等
- *    NUMPAD 模式需要的扩展 usage）。
+ *    NUMPAD 模式需要的扩展 usage）。上限必须是 0xFF：0xC7 会把 usage 0xD7 的
+ *    「+/-」排除在键阵列之外（主机侧同样解析不了），小键盘那个键在真机上完全失效。
  * 5. **LED 输出报告**：让主机回写 Num Lock / Caps Lock 状态（经
  *    `BluetoothHidDevice.Callback.onSetReport` 收到），便于键盘页显示 Caps Lock。
  *

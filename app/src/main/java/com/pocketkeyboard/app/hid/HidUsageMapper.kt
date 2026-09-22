@@ -7,7 +7,8 @@ import android.view.KeyEvent
  *
  * 覆盖范围（87 键 TKL 全部按键 + 小键盘 + 常用 Consumer 媒体键）：
  * - 字母 a–z、数字 0–9、全部符号键
- * - Esc、F1–F12（另含 F13–F24）、PrintScreen、Scroll Lock、Pause/Break
+ * - Esc、F1–F12、PrintScreen、Scroll Lock、Pause/Break（F13–F24 需要 usage
+ *   0x68–0x73，但 Android 没有对应 keyCode，只能由键盘页按名字显式发送，这里不映射）
  * - Tab、Caps Lock、Shift / Ctrl / Alt / GUI(⌘/Win) 左右共 8 个修饰键
  * - Backspace、Delete Forward、Insert、Home、End、Page Up/Down
  * - 四个方向键、Enter、Space、Application(菜单键)
@@ -267,6 +268,8 @@ object HidUsageMapper {
         KeyEvent.KEYCODE_MEDIA_NEXT to HidUsage.CONSUMER_SCAN_NEXT_TRACK,
         KeyEvent.KEYCODE_MEDIA_PREVIOUS to HidUsage.CONSUMER_SCAN_PREVIOUS_TRACK,
         KeyEvent.KEYCODE_MEDIA_EJECT to HidUsage.CONSUMER_EJECT,
+        KeyEvent.KEYCODE_MEDIA_FAST_FORWARD to HidUsage.CONSUMER_AC_FAST_FORWARD,
+        KeyEvent.KEYCODE_MEDIA_REWIND to HidUsage.CONSUMER_AC_REWIND,
         KeyEvent.KEYCODE_BRIGHTNESS_UP to HidUsage.CONSUMER_BRIGHTNESS_UP,
         KeyEvent.KEYCODE_BRIGHTNESS_DOWN to HidUsage.CONSUMER_BRIGHTNESS_DOWN,
     )

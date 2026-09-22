@@ -10,7 +10,8 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.result.ActivityResultLauncher
 import androidx.core.content.ContextCompat
-import com.pocketkeyboard.app.hid.ReflectionBondRemover
+import com.pocketkeyboard.app.hid.BondRemoval
+import com.pocketkeyboard.app.hid.removeBondAndConfirm
 import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.PairedDevice
 
@@ -104,12 +105,15 @@ internal fun requestDiscoverable(
 }
 
 /**
- * 解除某个已配对设备的系统 bond（Bug 3 侧滑删除）。
+ * 解除某个已配对设备的系统 bond（Bug 3 侧滑删除），并等系统确认结果。
  *
  * `BluetoothDevice.removeBond()` 是隐藏 API，由 hid 层的 [ReflectionBondRemover] 反射调用；
- * 权限不足 / 反射被拒时返回 false，由 UI 提示「删除失败」而不是假装成功。
- * 注意返回值只代表「命令已下发」，最终以系统 `ACTION_BOND_STATE_CHANGED` 广播为准——
- * HID 层收到 BOND_NONE 后会同步 registry 与 ViewModel，配对页再刷新列表即可一致。
+ * **它的返回值不能作为成败判据**——MIUI / Android 13 上常返回 false 却实际删除成功
+ * （实测反馈：总是提示「删除失败」，系统设置里却已清理）。因此成败以系统
+ * `ACTION_BOND_STATE_CHANGED → BOND_NONE` 广播为准，反射返回值只作日志参考；
+ * 广播丢失时再查一次 bondedDevices 作为第二意见（见 [removeBondAndConfirm]）。
  */
-internal fun removeBondedDevice(context: Context, address: String): Boolean =
-    ReflectionBondRemover(context).removeBond(address)
+internal suspend fun removeBondedDevice(
+    context: Context,
+    address: String,
+): BondRemoval = removeBondAndConfirm(context, address)

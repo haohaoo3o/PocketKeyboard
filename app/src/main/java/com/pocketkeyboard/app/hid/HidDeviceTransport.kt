@@ -283,13 +283,30 @@ class HidDeviceTransport(
         if (registered) {
             refreshBondedDevices()
             refreshConnectedHosts()
-            publishConnectedHosts()
             if (pluggedDeviceAddress != null) {
+                // Bug 2b：plugged 设备 = 「虚拟线缆已插上」= 有主机连着本外设。
+                // 必须显式登记为已连接：实测（小米 21091116UC + Android 13）
+                // `BluetoothHidDevice.getConnectedDevices()` 在 plugged 设备存在时仍返回
+                // 空列表，`onConnectionStateChanged` 也不会为存量连接补发事件，
+                // 只靠 refreshConnectedHosts() 会让 UI 的「已连接」永远不显示。
+                val becameConnected = synchronized(lock) {
+                    registry.updateConnectionState(
+                        pluggedDeviceAddress,
+                        HidHostRegistry.STATE_CONNECTED,
+                    )
+                }
+                val info = synchronized(lock) { registry.deviceInfo(pluggedDeviceAddress) }
+                if (becameConnected) info?.let { statusListener.onHostConnected(it) }
+                val activeBefore = synchronized(lock) { registry.activeAddress }
                 synchronized(lock) { registry.setActive(pluggedDeviceAddress) }
-                statusListener.onActiveDeviceChanged(
-                    pluggedDeviceAddress?.let { registry.deviceInfo(it) },
-                )
-            } else {
+                if (registryActiveAddress() != activeBefore) {
+                    statusListener.onActiveDeviceChanged(
+                        synchronized(lock) { registry.deviceInfo(pluggedDeviceAddress) },
+                    )
+                }
+            }
+            publishConnectedHosts()
+            if (pluggedDeviceAddress == null) {
                 tryConnectPreferredTarget()
             }
         } else {
@@ -297,6 +314,9 @@ class HidDeviceTransport(
             publishConnectedHosts()
         }
     }
+
+    /** 读 registry 的当前控制目标（锁外调用点用）。 */
+    private fun registryActiveAddress(): String? = synchronized(lock) { registry.activeAddress }
 
     override fun onConnectionStateChanged(address: String, state: Int) {
         Log.i(TAG, "onConnectionStateChanged $address state=$state")
@@ -515,12 +535,21 @@ class HidDeviceTransport(
      */
     private fun publishConnectedHosts() {
         val connected = synchronized(lock) { registry.connectedAddresses() }
+        Log.i(TAG, "publishConnectedHosts: registry connected = $connected")
         statusListener.onConnectedDevicesChanged(connected.toSet())
     }
 
-    /** 用 `BluetoothHidDevice.getConnectedDevices()` 刷新已连接列表。 */
+    /**
+     * 刷新已连接列表：`getConnectedDevices()` 列表 + 逐个 `getConnectionState()` 兜底。
+     *
+     * 为什么不能只用前者：实测（小米 21091116UC + Android 13）HID 主机已连着本外设时
+     * （`onAppStatusChanged` 带了 plugged 设备），`getConnectedDevices()` 仍返回空列表，
+     * 配对页的「已连接」因此永远不显示（Bug 2b）。逐个查询 `getConnectionState()`
+     * 覆盖这类 ROM 差异；任一来源说「已连接」即登记。
+     */
     private fun refreshConnectedHosts() {
         val hosts = gateway.connectedHosts()
+        Log.i(TAG, "refreshConnectedHosts: gateway reported ${hosts.map { it.address }}")
         synchronized(lock) {
             hosts.forEach { host ->
                 registry.update(host.address) { existing ->
@@ -541,6 +570,22 @@ class HidDeviceTransport(
                     platform = DevicePlatformDetector.detect(host.name, host.address),
                 ),
             )
+        }
+        // 兜底查询：地址在锁内快照，IPC 放在锁外，避免长时间持锁
+        val known = synchronized(lock) { registry.allEntries().map { it.address } }
+        known.forEach { address ->
+            if (hosts.any { it.address.equals(address, ignoreCase = true) }) return@forEach
+            val state = gateway.connectionState(address)
+            Log.i(TAG, "refreshConnectedHosts: getConnectionState($address) = $state")
+            if (state == HidHostRegistry.STATE_CONNECTED) {
+                val becameConnected = synchronized(lock) {
+                    registry.updateConnectionState(address, HidHostRegistry.STATE_CONNECTED)
+                }
+                if (becameConnected) {
+                    val info = synchronized(lock) { registry.deviceInfo(address) }
+                    info?.let { statusListener.onHostConnected(it) }
+                }
+            }
         }
         tryConnectPreferredTarget()
     }

@@ -19,8 +19,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -36,6 +39,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -54,6 +58,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketkeyboard.app.R
 import com.pocketkeyboard.app.gesture.GestureArbiter
+import com.pocketkeyboard.app.gesture.LocalFiveFingerGate
 import com.pocketkeyboard.app.hid.HidController
 import com.pocketkeyboard.app.hid.HidTransport
 import com.pocketkeyboard.app.hid.HidUsage
@@ -492,7 +497,7 @@ private fun FusedDeviceNameStrip(
 /**
  * 融合页中部：系统输入法唤起区（Bug 6 核心）。
  *
- * 一个**不可见**的 `BasicTextField`（文字 / 光标全透明）+ 未聚焦时的一行浅色提示。
+ * 一个**不可见**的 `BasicTextField`（文字 / 光标 / 手柄全部不可绘）+ 未聚焦时的一行浅色提示。
  * 点击该区域即取得焦点并弹出**手机系统输入法**；用户在系统输入法里打字（含中文、
  * Emoji、符号页），文本变更经 InputConnection 落到本文本框：
  *
@@ -515,7 +520,19 @@ private fun FusedDeviceNameStrip(
  * - 弹出：输入框聚焦即由系统弹出输入法（Compose 默认行为），同时
  *   [LocalSoftwareKeyboardController].show() 兜底（点提示区域等聚焦边缘场景）；
  * - 收起：离开本页（切模式 / 切页）时 `clearFocus()` + `hide()`，输入法不会
- *   留在屏幕上盖住下一个页面。
+ *   留在屏幕上盖住下一个页面；
+ * - **五指挥势联动收起（问题 3a / 3b）**：系统键盘弹出后屏幕下半是 IME 窗口，落在
+ *   它上面的手指到不了 App 的五指挥势层，5 指永远凑不齐。因此本区订阅
+ *   [LocalFiveFingerGate]，一出现五指挥势意图就立刻 `clearFocus()` + `hide()`
+ *   让出整块屏幕；同时 `clickable` 的门控保证「5 指按下时绝不聚焦弹键盘」。
+ *
+ * ## 光标与手柄为什么整框不可绘（问题 4）
+ *
+ * `cursorBrush` 透明只藏得住**光标线**；真机（MIUI）上还会留下白色的水滴形
+ * 光标手柄 / 选区手柄，而 Compose 的 `BasicTextField` 没有「关闭手柄」的开关。
+ * 因此整个输入框挂 `Modifier.graphicsLayer(alpha = 0f)`：**只影响绘制，不影响
+ * 输入**——InputConnection、焦点、触摸都照常工作，唯独画不出任何东西。
+ * （`graphicsLayer` 不参与命中测试，alpha = 0 的节点依然收到指针事件。）
  *
  * @param onCommitChar 提交了一个字符（调用方负责 fn 组合、修饰键叠加与 HID 映射）
  * @param onBackspace 文本缩短了 N 个字符（调用方补发 N 次退格）
@@ -531,6 +548,15 @@ private fun FusedImeInputArea(
     val focusRequester = remember { FocusRequester() }
     val contentDesc = stringResource(R.string.cd_fused_ime_input)
     val hint = stringResource(R.string.fused_ime_hint)
+    // 五指挥意图闸门：出现五指意图就收起系统输入法，把屏幕让给手势层
+    val fiveFingerGate = LocalFiveFingerGate.current
+    val yieldToFiveFinger = fiveFingerGate.shouldYieldToFiveFinger
+    LaunchedEffect(yieldToFiveFinger) {
+        if (yieldToFiveFinger) {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+        }
+    }
 
     // 输入框文本：恒定携带零宽空格哨兵（见 [IME_SENTINEL] 说明）
     var value by remember {
@@ -543,56 +569,81 @@ private fun FusedImeInputArea(
 
     Column(modifier = modifier.fillMaxWidth()) {
         FusedSectionSeam()
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .background(PureBlack)
-                // 点区域任意位置（含提示文字）都能聚焦并唤起系统输入法
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() },
-                ) {
-                    focusRequester.requestFocus()
-                    keyboardController?.show()
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            BasicTextField(
-                value = value,
-                onValueChange = { next ->
-                    if (next.composition != null) {
-                        // 组词中（中文拼音等）：只跟手更新文本，不转发、不清框
-                        value = next
-                        return@BasicTextField
-                    }
-                    val actions = ImeTextDiff.diff(lastCommitted, next.text)
-                    // 转发后统一清回哨兵态：对端已收到这些字符，本框不再保留
-                    lastCommitted = IME_SENTINEL
-                    value = TextFieldValue(
-                        text = IME_SENTINEL,
-                        selection = TextRange(IME_SENTINEL.length),
-                    )
-                    actions.forEach { action ->
-                        when (action) {
-                            is ImeKeyAction.Backspace -> onBackspace(action.count)
-                            is ImeKeyAction.Commit -> onCommitChar(action.char)
-                        }
-                    }
-                },
+            Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .focusRequester(focusRequester)
-                    .onFocusChanged { focused = it.isFocused }
-                    .semantics { this.contentDescription = contentDesc },
-                // 不可见：文字与光标全部透明（纯黑背景上完全看不出这是个输入框）
-                textStyle = TextStyle(color = Color.Transparent),
-                cursorBrush = SolidColor(Color.Transparent),
-                // 多行：回车键走「插入 \n」而不是 IME action，\n 由 HidUsageMapper
-                // 映射成 KEY_ENTER 发给对端
-                singleLine = false,
-                keyboardOptions = KeyboardOptions(),
-            )
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(PureBlack)
+                    // 点区域任意位置（含提示文字）都能聚焦并唤起系统输入法。
+                    // 五指挥势进行中一律不聚焦、不弹键盘（问题 3b：让位给模式切换手势）
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) {
+                        if (!fiveFingerGate.shouldYieldToFiveFinger) {
+                            focusRequester.requestFocus()
+                            keyboardController?.show()
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                // 问题 4：把「选区 / 光标手柄」的颜色也置透明。
+                //
+                // `cursorBrush` 只藏得住光标**线**；Compose 的水滴形光标手柄 / 选区手柄
+                // 走的是 `LocalTextSelectionColors.current.handleColor`，而且是在
+                // **Popup 窗口**里画的（`HandlePopup`，见 AndroidCursorHandle.android.kt），
+                // 因此挂在本输入框上的 `graphicsLayer(alpha = 0f)` 盖不住它——Popup 是
+                // 独立窗口，不是输入框 RenderNode 的子节点。
+                //
+                // 但 Popup 的内容是在**声明处**的组合作用域里组合的，CompositionLocal
+                // 照样会透传进去，所以在这里包一层透明 `LocalTextSelectionColors` 就能
+                // 让手柄画出来也是全透明。选区背景一并置透明，避免出现选区色块。
+                CompositionLocalProvider(
+                    LocalTextSelectionColors provides TextSelectionColors(
+                        handleColor = Color.Transparent,
+                        backgroundColor = Color.Transparent,
+                    ),
+                ) {
+                    BasicTextField(
+                        value = value,
+                        onValueChange = { next ->
+                            if (next.composition != null) {
+                                // 组词中（中文拼音等）：只跟手更新文本，不转发、不清框
+                                value = next
+                                return@BasicTextField
+                            }
+                            val actions = ImeTextDiff.diff(lastCommitted, next.text)
+                            // 转发后统一清回哨兵态：对端已收到这些字符，本框不再保留
+                            lastCommitted = IME_SENTINEL
+                            value = TextFieldValue(
+                                text = IME_SENTINEL,
+                                selection = TextRange(IME_SENTINEL.length),
+                            )
+                            actions.forEach { action ->
+                                when (action) {
+                                    is ImeKeyAction.Backspace -> onBackspace(action.count)
+                                    is ImeKeyAction.Commit -> onCommitChar(action.char)
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            // 双保险：整框不可绘。alpha = 0 的 graphicsLayer 只影响绘制，
+                            // 输入 / 焦点 / 触摸全部照常（graphicsLayer 不参与命中测试）
+                            .graphicsLayer(alpha = 0f)
+                            .fillMaxSize()
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { focused = it.isFocused }
+                            .semantics { this.contentDescription = contentDesc },
+                        // 双保险：即便整框不可绘，文字与光标也仍然是透明的
+                        textStyle = TextStyle(color = Color.Transparent),
+                        cursorBrush = SolidColor(Color.Transparent),
+                        // 多行：回车键走「插入 \n」而不是 IME action，\n 由 HidUsageMapper
+                        // 映射成 KEY_ENTER 发给对端
+                        singleLine = false,
+                        keyboardOptions = KeyboardOptions(),
+                    )
+                }
+
 
             // 未聚焦时的浅色提示（聚焦后隐藏，让位给系统输入法）
             if (!focused) {
@@ -676,14 +727,19 @@ private fun FusedModifierRow(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight(),
-                    onPress = {},
-                    onRelease = {
+                    onPress = {
+                        // 走 onPress 而不是 onRelease：`pocketKeyGestures` 的「五指防误触
+                        // 门控」挂在激活那一刻（onPress）上，5 指凑齐时整颗键作废、
+                        // onPress 根本不会被调用——修饰键因此不会在五指挥势中被误锁定。
+                        // 放在 onRelease 上则会绕过门控：作废时 onRelease 照旧触发。
                         if (spec.modifier != null) {
                             onToggleModifier(spec.modifier)
                         } else {
                             onDirectAction(spec.spec.action)
                         }
                     },
+                    // 报告在 onPress 那一刻就发了，正常抬起无需再做事
+                    onRelease = {},
                     onAbandoned = {},
                 )
             }

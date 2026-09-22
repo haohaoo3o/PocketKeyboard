@@ -45,11 +45,15 @@ fun List<PointerInputChange>.toFingerPoints(): List<FingerPoint> =
 /**
  * 计算五指几何快照。
  *
- * @param points 必须恰好包含 [GestureConstants.REQUIRED_FINGER_COUNT] 个指尖，
- *    否则返回 null（手势层在指针数不足 5 时会直接放弃跟踪）。
+ * @param points 至少要包含 [GestureConstants.REQUIRED_FINGER_COUNT] 个指尖，否则返回 null。
+ *    **多于 5 个也接受**（手心 / 掌根贴到屏幕时系统会多报一根指针）：真机实测一根额外的
+ *    掌根接触在 5 指挥势里很常见，若按「必须恰好 5 根」判 null，整个手势会被静默丢弃
+ *   （上一轮 pinch / spread 「不触发」的疑点之一）。超过 5 根时按全部指尖计算，
+ *   收缩 / 张开是**比例**判定、横滑比的是**质心位移**，多一根掌根只带来很小的偏差，
+ *   不至于把合法手势判死。
  */
 fun fiveFingerGeometry(points: List<FingerPoint>): FiveFingerGeometry? {
-    if (points.size != GestureConstants.REQUIRED_FINGER_COUNT) return null
+    if (points.size < GestureConstants.REQUIRED_FINGER_COUNT) return null
     var sumX = 0f
     var sumY = 0f
     points.forEach {

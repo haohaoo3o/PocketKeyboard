@@ -2,6 +2,7 @@ package com.pocketkeyboard.app.ui.pairing
 
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.util.Log
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -54,9 +55,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.PathParser
@@ -83,7 +86,9 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketkeyboard.app.R
+import com.pocketkeyboard.app.hid.BondRemoval
 import com.pocketkeyboard.app.hid.HidController
+import com.pocketkeyboard.app.hid.removeBondAndConfirm
 import com.pocketkeyboard.app.ui.AppMode
 import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.MainViewModel
@@ -100,6 +105,9 @@ import kotlin.random.Random
 /** 配对码位数：6 位数字。 */
 private const val PIN_LENGTH = 6
 
+/** 配对页日志 TAG（删除流程等需要在真机上定位的路径）。 */
+private const val TAG = "PairingScreen"
+
 /** 「可被发现」胶囊按钮的可视高度（dp）：文字用 bodySmall 档，固定高度 + 垂直居中不裁切。 */
 private const val DISCOVERABLE_BUTTON_HEIGHT = 40
 
@@ -109,8 +117,6 @@ private const val DISCOVERABLE_TOUCH_OVERHANG = 4
 /** 平台图标尺寸（dp）：20–24dp 区间内，与设备名首行基线对齐。 */
 private const val PLATFORM_ICON_SIZE = 22
 
-/** 平台图标 SVG 路径的视口边长（simple-icons 的 24×24 视口）。 */
-private const val PLATFORM_ICON_VIEWPORT = 24f
 
 /** CONTROL 按钮按下时的缩放（苹果式按压手感）。 */
 private const val PRESSED_SCALE = 0.97f
@@ -163,19 +169,27 @@ private val DestructiveRed = Color(0xFFFF3B30)
  *    一起切过去，否则 UI 显示已切换、HID 报告却仍发给上一个设备。为 null 时（例如
  *     预览 / 单测）只写 ViewModel。
  * @param removeBond 解除系统配对的注入点；null = 系统实现（hid 层反射
- *     `BluetoothDevice.removeBond()`，见 [removeBondedDevice]）。单测传假实现即可验证
- *     「删除成功」的完整 UI 流程，不必依赖 Robolectric 蓝牙桩的返回值。
+ *     `BluetoothDevice.removeBond()` + 等 `ACTION_BOND_STATE_CHANGED → BOND_NONE`
+ *     广播确认，见 [removeBondAndConfirm]）。单测传假实现（返回 [BondRemoval]）
+ *     即可验证「删除成功 / 删除失败」两条 UI 流程，不必依赖 Robolectric 蓝牙桩。
  */
 @Composable
 fun PairingScreen(
     modifier: Modifier = Modifier,
     viewModel: MainViewModel = viewModel(),
     hidController: HidController? = null,
-    removeBond: ((String) -> Boolean)? = null,
+    removeBond: (suspend (String) -> BondRemoval)? = null,
 ) {
     val context = LocalContext.current
-    val removeBondAction = removeBond ?: remember(context) {
-        { address: String -> removeBondedDevice(context, address) }
+    // 删除的成败判据是 bond 广播（见 removeBondAndConfirm），因此整个删除流程是
+    // 挂起函数：确认弹窗的 onConfirm 里起协程等待，期间弹窗已关闭、列表保持原样，
+    // 出结果后再决定摘行还是提示失败。
+    // 注意：elvis 右侧必须先落到「显式声明为挂起函数类型」的局部变量上，
+    // 否则 lambda 会被推断成普通 Function1、无法调用挂起的 removeBondedDevice。
+    val removeBondAction: suspend (String) -> BondRemoval = remember(context) {
+        val systemImplementation: suspend (String) -> BondRemoval =
+            { address -> removeBondedDevice(context, address) }
+        removeBond ?: systemImplementation
     }
     val platformStore = remember { DevicePlatformStore(context) }
     val scope = rememberCoroutineScope()
@@ -426,29 +440,41 @@ fun PairingScreen(
         DeleteConfirmDialog(
             deviceName = device.name,
             onConfirm = {
-                // 先清 DataStore 平台记录：即使 removeBond 失败，再次 bond 同一设备时
-                // 也会重新询问平台，不会 silently 继承旧选择
-                scope.launch { platformStore.remove(device.address) }
-                val removed = removeBondAction(device.address)
-                if (!removed) {
-                    // 反射被拒 / 权限不足：保留设备，提示失败（系统配对关系仍存在）
-                    deleteFailed = true
-                } else {
-                    // 本地立刻摘掉该设备，不依赖 bond 广播：HID 后端被注销 / 方案 B
-                    // 空实现时收不到 ACTION_BOND_STATE_CHANGED，UI 也要立即一致
-                    viewModel.setPairedDevices(
-                        viewModel.pairedDevices.value.filterNot { it.address == device.address },
-                    )
-                    if (viewModel.activeDevice.value?.address == device.address) {
-                        viewModel.setActiveDevice(null)
-                    }
-                    viewModel.setConnectedDeviceAddresses(
-                        viewModel.connectedDeviceAddresses.value - device.address,
-                    )
-                    hidController?.disconnectHost(device.address)
-                    localBluetooth = loadLocalBluetooth(context, platforms)
-                }
+                Log.i(TAG, "delete confirmed for ${device.address}")
                 pendingDelete = null
+                scope.launch {
+                    Log.i(TAG, "delete coroutine started for ${device.address}")
+                    val outcome = removeBondAction(device.address)
+                    Log.i(TAG, "bond removal for ${device.address}: $outcome")
+                    when (outcome) {
+                        is BondRemoval.Failed -> {
+                            // 反射被拒 / 权限不足 / 广播确认设备仍在 bonded：
+                            // 保留设备与平台记录，提示失败
+                            deleteFailed = true
+                        }
+
+                        is BondRemoval.Removed -> {
+                            Log.i(TAG, "delete removed ${device.address}")
+                            // 解除成功：**先**本地摘掉该设备（不等磁盘 IO，UI 立刻一致），
+                            // **再**清 DataStore 平台记录（再次 bond 时重新询问平台）。
+                            // 摘行不依赖 bond 广播：HID 后端被注销 / 方案 B 空实现时
+                            // 收不到 ACTION_BOND_STATE_CHANGED，UI 也要立即一致
+                            viewModel.setPairedDevices(
+                                viewModel.pairedDevices.value
+                                    .filterNot { it.address == device.address },
+                            )
+                            if (viewModel.activeDevice.value?.address == device.address) {
+                                viewModel.setActiveDevice(null)
+                            }
+                            viewModel.setConnectedDeviceAddresses(
+                                viewModel.connectedDeviceAddresses.value - device.address,
+                            )
+                            hidController?.disconnectHost(device.address)
+                            localBluetooth = loadLocalBluetooth(context, platforms)
+                            platformStore.remove(device.address)
+                        }
+                    }
+                }
             },
             onDismiss = { pendingDelete = null },
         )
@@ -1180,46 +1206,31 @@ private fun PlatformOption(
         }
     }
 }
-
 /**
  * 平台标识图标：苹果 logo / Windows logo（四格），纯代码矢量、白色填充。
  *
- * 路径数据取自 simple-icons（CC0 授权）的 24×24 视口 SVG path 字符串，用 Compose
- * 自带的 [PathParser] 解析成 [Path]，再由 [Canvas] 按图标尺寸缩放绘制；不引入
- * 任何第三方图标库，也没有位图资源。
+ * 路径数据与归一化见 [PlatformIconPaths] / [SvgPathNormalizer]：数据逐字符对齐上游
+ * simple-icons（CC0）的 24×24 视口 path，解析前先归一化，避免「字符串拼接换行落在
+ * 数字中间」造成的静默错位（Bug 1）。
  */
 private object PlatformIcons {
 
     /** 苹果 logo（带叶子与咬口的剪影）。 */
     val Apple: Path by lazy {
-        PathParser().parsePathString(APPLE_LOGO_PATH).toPath(Path())
+        PathParser().parsePathString(SvgPathNormalizer.normalize(PlatformIconPaths.APPLE))
+            .toPath(Path())
     }
 
     /** Windows logo（四格窗格）。 */
     val Windows: Path by lazy {
-        PathParser().parsePathString(WINDOWS_LOGO_PATH).toPath(Path())
+        PathParser().parsePathString(SvgPathNormalizer.normalize(PlatformIconPaths.WINDOWS))
+            .toPath(Path())
     }
 
     fun of(platform: DevicePlatform): Path = when (platform) {
         DevicePlatform.APPLE -> Apple
         DevicePlatform.OTHER -> Windows
     }
-
-    private const val APPLE_LOGO_PATH =
-        "M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014" +
-            "-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039" +
-            "1.52-.065 2.09-.987 3.936-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48" +
-            "3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221" +
-            "-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376" +
-            "-2-.156-3.675 1.09-4.61 1.09z" +
-            "M15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818" +
-            "-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"
-
-    private const val WINDOWS_LOGO_PATH =
-        "M0 3.449L9.75 2.1v9.451H0" +
-            "m10.949-9.602L24 0v11.4H10.949" +
-            "M0 12.6h9.75v9.451L0 20.699" +
-            "m10.949 12.6H24V24l-12.9-1.801"
 }
 
 /**
@@ -1246,11 +1257,29 @@ private fun PlatformIcon(
                 },
             ),
     ) {
-        // SVG 路径是 24×24 视口，绘制时按图标实际尺寸等比缩放
-        val factor = size.minDimension / PLATFORM_ICON_VIEWPORT
-        scale(factor, factor) {
-            drawPath(path = path, color = PureWhite)
-        }
+        drawPlatformIconPath(path)
+    }
+}
+
+/**
+ * 把 24×24 视口内的平台徽标 [Path] 等比铺满当前画布（Bug 1 修复点）。
+ *
+ * 为什么必须显式给 [Offset.Zero]：`DrawScope.scale` 的 pivot 默认值是**画布中心**，
+ * viewport 坐标 [0, 24] 绕中心放大后整条路径被平移到画布外，只剩一小块碎片可见
+ * （真机上两个徽标都表现为「残缺/碎裂」）。以原点为 pivot 时 `[0,24]² → [0, size]²`
+ * 正好铺满，与 SVG 的 preserveAspectRatio 行为一致。
+ *
+ * 抽成独立函数（而不是内联在 `PlatformIcon` 里）是为了让单测能在同一段生产代码上
+ * 光栅化并断言覆盖率（见 `PlatformIconPathsTest`）。
+ */
+internal fun DrawScope.drawPlatformIconPath(
+    path: Path,
+    color: Color = PureWhite,
+) {
+    // SVG 路径是 24×24 视口，绘制时按图标实际尺寸等比缩放
+    val factor = size.minDimension / PlatformIconPaths.VIEWPORT
+    scale(scaleX = factor, scaleY = factor, pivot = Offset.Zero) {
+        drawPath(path = path, color = color)
     }
 }
 
