@@ -53,12 +53,21 @@ for PERM in ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION BLUETOOTH_CONNECT \
 done
 adb -s "$DEV" shell am start -n "$ACT" >/dev/null
 sleep 3
+# 等待广播名改写生效（App 启动后把蓝牙名设为 PocketKeyboard-<品牌>）：
+# force-stop 后首次启动可能要先走注册自愈（约 20s）才改名，截早了会拍到旧系统名。
+echo "==> 等待广播名 PocketKeyboard-* 生效"
+for _ in $(seq 1 40); do
+  NAME="$(adb -s "$DEV" shell settings get secure bluetooth_name | tr -d '\r')"
+  case "$NAME" in PocketKeyboard-*) break ;; esac
+  sleep 1
+done
+sleep 1
 
 # 底部 dock 三项的中心坐标（1080x2400 竖屏）：配对 / 键盘 / 触控板
 NAV_PAIRING_X=180
 NAV_KEYBOARD_X=540
 NAV_TRACKPAD_X=900
-NAV_Y=2250
+NAV_Y=2317
 # 横屏（2400x1080）下 dock 三项的中心坐标（横屏底栏更靠上、三项均分全宽）
 LAND_NAV_PAIRING_X=393
 LAND_NAV_KEYBOARD_X=1200
@@ -98,7 +107,7 @@ shot cap_keyboard.png 02_keyboard.png
 
 echo "==> 3/4 融合页 + 系统输入法弹出（点输入区唤起手机输入法）"
 # 输入区提示文字位置（1080x2400 竖屏），点击后弹出系统输入法
-adb -s "$DEV" shell input tap 540 2148
+adb -s "$DEV" shell input tap 540 2100
 sleep 3
 shot cap_trackpad.png 03_trackpad.png
 adb -s "$DEV" shell input keyevent 4   # 收起系统键盘

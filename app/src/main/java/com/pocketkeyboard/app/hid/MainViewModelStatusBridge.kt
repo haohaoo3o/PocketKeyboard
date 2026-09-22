@@ -3,6 +3,8 @@ package com.pocketkeyboard.app.hid
 import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.MainViewModel
 import com.pocketkeyboard.app.ui.PairedDevice
+import com.pocketkeyboard.app.ui.PairingDisplay
+import com.pocketkeyboard.app.ui.PairingDisplayKind
 import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,27 +15,28 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * 设计约束：
  * - 本层**不直接操作 UI**，也不持有 Activity / View；
- * - 只调用 `MainViewModel` 既有的 setter（`setPinCode` / `setPairedDevices` /
- *   `setActiveDevice` / `setConnectedDeviceAddresses`），不改契约字段；
+ * - 只调用 `MainViewModel` 既有的 setter（`setPinCode` / `setPairingDisplay` /
+ *   `setPairedDevices` / `setActiveDevice` / `setConnectedDeviceAddresses`），
+ *   不改契约字段（新增字段见 MainViewModel 内注释）；
  * - 平台判定线索（[HidDeviceInfo.platform]）在这里转成 UI 契约的
  *   [DevicePlatform]；无法判定时保守地给 [DevicePlatform.OTHER]，
  *   由配对页首次连接时的平台选择 Dialog 纠正并持久化。
  *
- * 本类同时实现 [PairingPinProvider]：配对码自动应答（Bug 2a）需要知道「App 当前展示的
- * 6 位配对码」，这个值的唯一来源就是 `MainViewModel.pinCode`，因此由 bridge 直接提供，
- * 避免 hid 层反向依赖 UI。
+ * 配对码展示策略（配对接管）：`MainViewModel.pinCode` 存「当前展示的数字」，
+ * [PairingDisplay] 告诉 UI 怎么展示 / 是否收集输入——页面上显示的永远等于实际配对用的：
+ * - `PIN`：展示 App 固定配对码 [APP_PAIRING_PIN]（应答器 `setPin` 的就是它）；
+ * - `PASSKEY_ENTRY`：展示输入框，用户转述对端屏幕上的数字（[PairingDisplayKind.NEED_REMOTE_KEY_INPUT]）；
+ * - `PASSKEY_CONFIRMATION` / `DISPLAY`：展示系统当次生成的真实数字（EXTRA_PAIRING_KEY）；
+ * - `CONSENT`：无数字，已自动确认。
  */
 class MainViewModelStatusBridge(
     private val viewModel: MainViewModel,
-) : HidStatusListener, PairingPinProvider {
+) : HidStatusListener {
 
     private val _unavailableReason = MutableStateFlow<HidUnavailableReason?>(null)
 
     /** 最近一次「连接不可用」原因；UI 可据此展示中文提示。 */
     val unavailableReason: StateFlow<HidUnavailableReason?> = _unavailableReason.asStateFlow()
-
-    override val pairingPinCode: String?
-        get() = viewModel.pinCode.value
 
     override fun onAppRegistrationChanged(registered: Boolean) {
         // MainViewModel 契约里没有单独的注册状态字段，注册结果通过设备列表 /
@@ -53,6 +56,14 @@ class MainViewModelStatusBridge(
         val current = viewModel.pairedDevices.value
         if (current.none { it.address == device.address }) {
             viewModel.setPairedDevices(current + device.toPairedDevice())
+        }
+        // 连上了：该地址的「连接中 / 连接失败」行内提示就该退场（不止依赖快照回调，
+        // 单点事件路径也要自洽，避免快照时序把「连接中」留在已连接的行上）
+        if (viewModel.connectingDeviceAddress.value == device.address) {
+            viewModel.setConnectingDeviceAddress(null)
+        }
+        if (viewModel.connectFailedAddress.value == device.address) {
+            viewModel.setConnectFailedAddress(null)
         }
         // 不主动抢夺用户已选定的控制目标：只在还没有目标时把新连接的设备设为目标。
         if (viewModel.activeDevice.value == null) {
@@ -107,25 +118,58 @@ class MainViewModelStatusBridge(
     }
 
     override fun onBondStateChanged(address: String, state: HidBondState) {
-        // 配对流程结束（成功或被移除）后清掉配对码，避免残留。
+        // 配对流程结束（成功或被移除）后回到空闲态：展示固定配对码 0000
         if (state == HidBondState.BONDED || state == HidBondState.NONE) {
             viewModel.setPinCode(null)
+            viewModel.setPairingDisplay(null)
         }
     }
 
     override fun onPairingRequest(address: String, variant: HidPairingVariant, pinOrPasskey: Int?) {
-        // 配对码展示策略（Bug 2a）：
-        // - PASSKEY_ENTRY / PIN：SystemPairingResponder 用 App 配对码自动应答，被控端要输入
-        //   的就是 App 屏幕上那个码，因此优先展示 App 配对码；App 侧没有码时才退回系统广播值；
-        // - 数字比较 / Just Works：没有需要用户输入的数字，只展示系统广播带来的数字（没有则
-        //   清空显示占位），确认由 App 自动完成，用户无需再点。
-        val appPin = viewModel.pinCode.value?.takeIf { it.isNotBlank() }
-        val systemPin = pinOrPasskey?.let { String.format(Locale.US, "%06d", it) }
-        val display = when (variant) {
-            HidPairingVariant.PIN, HidPairingVariant.PASSKEY_ENTRY -> appPin ?: systemPin
-            else -> systemPin
+        // 配对码展示策略（配对接管）：屏幕上的数字 = 实际配对用的数字
+        val systemKey = pinOrPasskey?.let { String.format(Locale.US, "%06d", it) }
+        when (variant) {
+            // PIN 输入类：应答器 setPin(0000)，被控端也输入 App 展示的 0000
+            HidPairingVariant.PIN -> {
+                viewModel.setPinCode(APP_PAIRING_PIN)
+                viewModel.setPairingDisplay(PairingDisplay(address, PairingDisplayKind.SHOW_APP_PIN))
+            }
+            // 对端展示数字、本端输入：展示输入框收集用户转述的数字
+            HidPairingVariant.PASSKEY_ENTRY -> {
+                viewModel.setPinCode(null)
+                viewModel.setPairingDisplay(
+                    PairingDisplay(address, PairingDisplayKind.NEED_REMOTE_KEY_INPUT),
+                )
+            }
+            // 数字比较：两边同一数字（系统生成），App 自动确认并展示供核对
+            HidPairingVariant.PASSKEY_CONFIRMATION -> {
+                viewModel.setPinCode(systemKey)
+                viewModel.setPairingDisplay(PairingDisplay(address, PairingDisplayKind.SHOW_SHARED_KEY))
+            }
+            // 本端展示类：数字由系统生成、用户在被控端输入，App 只负责展示
+            HidPairingVariant.DISPLAY -> {
+                viewModel.setPinCode(systemKey)
+                viewModel.setPairingDisplay(PairingDisplay(address, PairingDisplayKind.SHOW_ENTRY_KEY))
+            }
+            // Just Works：没有数字，展示已自动确认
+            HidPairingVariant.CONSENT -> {
+                viewModel.setPinCode(null)
+                viewModel.setPairingDisplay(PairingDisplay(address, PairingDisplayKind.AUTO_CONFIRMED))
+            }
+            // 带外 / 未知：不接管展示，留系统配对框
+            HidPairingVariant.OOB, HidPairingVariant.UNKNOWN -> {
+                viewModel.setPinCode(null)
+                viewModel.setPairingDisplay(null)
+            }
         }
-        viewModel.setPinCode(display)
+    }
+
+    override fun onPairingAutoAnswered(address: String, answer: PairingAnswer) {
+        // 应答真的成功了才说「已自动确认」；被平台封锁（BLUETOOTH_PRIVILEGED）时
+        // 提示保持引导系统配对框的文案，绝不谎报
+        if (answer == PairingAnswer.CONFIRMED) {
+            viewModel.setPairingDisplay(PairingDisplay(address, PairingDisplayKind.AUTO_CONFIRMED))
+        }
     }
 
     override fun onUnavailable(reason: HidUnavailableReason) {

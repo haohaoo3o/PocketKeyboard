@@ -19,6 +19,36 @@ enum class DevicePlatform { APPLE, OTHER }
 enum class AppMode { PAIRING, KEYBOARD, TRACKPAD, NUMPAD }
 
 /**
+ * 配对进行中的展示指令（null = 空闲，配对页展示固定配对码 `0000`）。
+ *
+ * 配对码的**真实值**随变体而变：PIN 输入类是 App 固定码 0000，数字比较 / 本端展示类
+ * 是系统当次生成的数字，PASSKEY_ENTRY 则要用户把对端屏幕上的数字转述进 App。
+ * [MainViewModel.pinCode] 存「当前展示的数字」，本类型告诉 UI 该怎么展示 / 是否收集输入。
+ */
+enum class PairingDisplayKind {
+    /** 展示 App 固定配对码（0000）：被控设备要求输入 PIN / 配对码时用。 */
+    SHOW_APP_PIN,
+
+    /** 展示系统生成的共享数字（数字比较）：与被控设备屏幕核对一致，已自动确认。 */
+    SHOW_SHARED_KEY,
+
+    /** 展示系统生成的输入数字（本端展示类）：在被控设备上输入这组数字。 */
+    SHOW_ENTRY_KEY,
+
+    /** 收集输入：对端屏幕上展示的数字需要用户在 App 内输入后提交。 */
+    NEED_REMOTE_KEY_INPUT,
+
+    /** 无数字可展示，已自动确认配对（Just Works）。 */
+    AUTO_CONFIRMED,
+}
+
+/** 配对展示状态：哪个设备在配对、以哪种方式展示 / 收集配对码。 */
+data class PairingDisplay(
+    val address: String,
+    val kind: PairingDisplayKind,
+)
+
+/**
  * 全局共享 ViewModel（跨模块契约）。
  *
  * 由 MainActivity 持有，驱动页面切换；配对与传输逻辑由后续工程师填充，
@@ -28,8 +58,18 @@ class MainViewModel : ViewModel() {
 
     private val _pinCode = MutableStateFlow<String?>(null)
 
-    /** 配对码，null 表示无。 */
+    /**
+     * 当前展示的配对数字，null = 空闲（配对页展示固定配对码 `0000`）。
+     *
+     * 配对进行中由 HID bridge 写入**当次真实数字**（App 固定码 / 系统生成码），
+     * 配对结束清空回空闲态——「页面上显示的」永远等于「实际用来配对的」。
+     */
     val pinCode: StateFlow<String?> = _pinCode.asStateFlow()
+
+    private val _pairingDisplay = MutableStateFlow<PairingDisplay?>(null)
+
+    /** 配对进行中的展示指令；null = 空闲。 */
+    val pairingDisplay: StateFlow<PairingDisplay?> = _pairingDisplay.asStateFlow()
 
     private val _pairedDevices = MutableStateFlow<List<PairedDevice>>(emptyList())
 
@@ -81,6 +121,11 @@ class MainViewModel : ViewModel() {
 
     fun setPinCode(pinCode: String?) {
         _pinCode.value = pinCode
+    }
+
+    /** 置位 / 清空配对展示指令（null = 空闲，展示固定配对码）。 */
+    fun setPairingDisplay(display: PairingDisplay?) {
+        _pairingDisplay.value = display
     }
 
     fun setPairedDevices(devices: List<PairedDevice>) {

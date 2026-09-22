@@ -72,6 +72,15 @@ class HidController(
         deviceTransport?.disconnectHost(address)
     }
 
+    /**
+     * 提交用户在 App 内输入的对端 passkey（PASSKEY_ENTRY 配对变体的续答）。
+     *
+     * 对端屏幕上展示的数字由用户转述进来，经反射 `setPin` 完成配对应答。
+     */
+    fun submitPairingPasskey(address: String, passkey: String) {
+        deviceTransport?.submitPairingPasskey(address, passkey)
+    }
+
     /** 当前已连接设备。 */
     fun connectedDevices(): List<HidDeviceInfo> = deviceTransport?.connectedDevices() ?: emptyList()
 }

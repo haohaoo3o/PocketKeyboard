@@ -52,6 +52,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
@@ -70,6 +72,7 @@ import com.pocketkeyboard.app.gesture.GestureFeedback
 import com.pocketkeyboard.app.gesture.PocketGestureHandler
 import com.pocketkeyboard.app.gesture.applePageTransitionSpec
 import com.pocketkeyboard.app.gesture.cycleActiveDevice
+import com.pocketkeyboard.app.gesture.gestureStateSelfHeal
 import com.pocketkeyboard.app.gesture.pocketGestures
 import com.pocketkeyboard.app.gesture.rememberGestureHudState
 import com.pocketkeyboard.app.hid.HidController
@@ -159,6 +162,25 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
     })
 
     val mode by viewModel.mode.collectAsStateWithLifecycle()
+
+    // 横竖屏：manifest 声明了 configChanges 含 orientation，旋转不会重建 Activity，
+    // 这里读 LocalConfiguration 直接切换布局（横屏 = 全屏 87 键键盘 / 全屏触控板）
+    val landscape =
+        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    // 页面级输入法收起（唯一 owner，见 FusedControlScreen 里 isActivePage 的说明）：
+    // 竖屏融合页内部 mode 切换的弹 / 收由该页自己管；这里只管**离开融合页**的两种
+    // 去向——去配对页、转横屏（横屏是 87 键 / 全屏触控板，不需要系统输入法）。
+    // 放在退场实例的 onDispose 里会与入场实例的自动弹出竞态（真机实测五指张开
+    // 切键盘模式后，退场页 dispose 把刚弹出的输入法又收回去）。
+    val imeFocusManager = LocalFocusManager.current
+    val imeKeyboardController = LocalSoftwareKeyboardController.current
+    LaunchedEffect(mode, landscape, imeFocusManager, imeKeyboardController) {
+        if (mode == AppMode.PAIRING || landscape) {
+            imeFocusManager.clearFocus()
+            imeKeyboardController?.hide()
+        }
+    }
 
     // 手势视觉反馈（HUD 文字提示 + 设备切换覆盖式转场）
     val hudState = rememberGestureHudState()
@@ -251,11 +273,6 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
         )
     }
 
-    // 横竖屏：manifest 声明了 configChanges 含 orientation，旋转不会重建 Activity，
-    // 这里读 LocalConfiguration 直接切换布局（横屏 = 全屏 87 键键盘 / 全屏触控板）
-    val landscape =
-        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-
     // ---------------------------------------------------------------- dock 可见性
     //
     // 规则（纯函数部分见 [dockVisibleFor]，单测覆盖）：
@@ -315,6 +332,10 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
                         arbiter = arbiter,
                         gate = fiveFingerGate,
                     )
+                    // 触摸序列结束（所有指针抬起，含 ACTION_CANCEL 合成事件）即强制复位
+                    // 闸门 / 仲裁器的自愈层：五指层协程被取消或异常退出时接管复位，
+                    // 保证「点输入区一定能弹键盘」不被陈旧的让位态拦截（问题 3a 兜底）
+                    .gestureStateSelfHeal(arbiter = arbiter, gate = fiveFingerGate)
                     // 侧滑激活 dock：只在 dock 隐藏时挂载；配对页 dock 常显，无需激活
                     .edgeSwipeToShowDock(
                         enabled = !dockVisible,

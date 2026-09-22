@@ -328,6 +328,27 @@ class SystemHidProfileGateway(
         }
     }
 
+    /**
+     * 设置本机蓝牙广播名（`BluetoothAdapter.setName`）。
+     *
+     * 这是被控设备蓝牙菜单里看到的 GAP 名（经典蓝牙下 SDP 记录名只是服务名，
+     * 列表里显示的是适配器名），因此「PocketKeyboard-redmi」这类与手机系统名的
+     * 区分必须靠这里。名字已一致时直接返回 true（幂等，避免无谓的适配器写操作）。
+     */
+    @SuppressLint("MissingPermission")
+    override fun setLocalName(name: String): Boolean {
+        val currentAdapter = adapter ?: return false
+        if (missingConnectPermission()) return false
+        return try {
+            val current = currentAdapter.name
+            if (current == name) return true
+            currentAdapter.setName(name)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "setName failed", e)
+            false
+        }
+    }
+
     // ---------------------------------------------------------------- 内部工具
 
     private fun remoteDevice(address: String): BluetoothDevice? = try {

@@ -32,18 +32,22 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -73,6 +77,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -86,6 +91,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pocketkeyboard.app.R
+import com.pocketkeyboard.app.hid.APP_PAIRING_PIN
 import com.pocketkeyboard.app.hid.BondRemoval
 import com.pocketkeyboard.app.hid.HidController
 import com.pocketkeyboard.app.hid.HidStatusText
@@ -94,6 +100,8 @@ import com.pocketkeyboard.app.ui.AppMode
 import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.MainViewModel
 import com.pocketkeyboard.app.ui.PairedDevice
+import com.pocketkeyboard.app.ui.PairingDisplay
+import com.pocketkeyboard.app.ui.PairingDisplayKind
 import com.pocketkeyboard.app.ui.theme.MinimalGray
 import com.pocketkeyboard.app.ui.theme.PureBlack
 import com.pocketkeyboard.app.ui.theme.PureWhite
@@ -101,9 +109,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlin.random.Random
 
-/** 配对码位数：6 位数字。 */
+/** 配对码位数上限：系统生成码 6 位，App 固定码 4 位（0000），按实际位数渲染。 */
 private const val PIN_LENGTH = 6
 
 /** 配对页日志 TAG（删除流程等需要在真机上定位的路径）。 */
@@ -199,6 +206,7 @@ fun PairingScreen(
     val pairedDevices by viewModel.pairedDevices.collectAsStateWithLifecycle()
     val activeDevice by viewModel.activeDevice.collectAsStateWithLifecycle()
     val pinCode by viewModel.pinCode.collectAsStateWithLifecycle()
+    val pairingDisplay by viewModel.pairingDisplay.collectAsStateWithLifecycle()
     val connectedAddresses by viewModel.connectedDeviceAddresses.collectAsStateWithLifecycle()
     // A2：主动连接的行内状态（连接中 / 连接失败）——点击设备行后立刻有可见反馈
     val connectingAddress by viewModel.connectingDeviceAddress.collectAsStateWithLifecycle()
@@ -213,12 +221,11 @@ fun PairingScreen(
     var showControlHint by remember { mutableStateOf(false) }
     var discoverableSeconds by remember { mutableIntStateOf(0) }
 
-    // 配对流程需要一个 6 位数字配对码；ViewModel 里还没有时由本页生成并回写，
-    // 之后一律以 viewModel.pinCode 为唯一来源展示。
-    LaunchedEffect(Unit) {
-        if (viewModel.pinCode.value.isNullOrBlank()) {
-            viewModel.setPinCode(randomPinCode())
-        }
+    // 「添加被控设备」：App 内扫描 + 发起配对（createBond），全程不离开 App
+    val scanner = remember(context) { DeviceScanner(context.applicationContext) }
+    var showAddDevice by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        onDispose { scanner.stopScan() }
     }
 
     // 权限申请时机：进入配对页即补齐「读本机蓝牙信息」所需权限（MainActivity 已在启动时
@@ -248,6 +255,27 @@ fun PairingScreen(
     // 返回必然经过 ON_START）。刷新的结果同时喂给下面的合并 Effect。
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         localBluetooth = loadLocalBluetooth(context, platforms)
+    }
+
+    // 广播名由 App 启动时改写为 PocketKeyboard-<品牌>（异步发生在 HID 初始化里）：
+    // 监听 LOCAL_NAME_CHANGED 让头部立即显示新名，不等下一次 ON_START
+    DisposableEffect(context) {
+        val nameReceiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+                localBluetooth = loadLocalBluetooth(context ?: return, platforms)
+            }
+        }
+        runCatching {
+            ContextCompat.registerReceiver(
+                context,
+                nameReceiver,
+                android.content.IntentFilter(BluetoothAdapter.ACTION_LOCAL_NAME_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+        }
+        onDispose {
+            runCatching { context.unregisterReceiver(nameReceiver) }
+        }
     }
 
     // 设备列表以 viewModel.pairedDevices 为唯一来源；系统 bonded 设备（localBluetooth）
@@ -332,15 +360,39 @@ fun PairingScreen(
             },
         )
 
-        // 配对码：页面中央
+        // 配对码：页面中央（空闲 = 固定 0000；配对中按变体展示真实数字 / 收集输入）
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
             contentAlignment = Alignment.Center,
         ) {
-            PinCodeBlock(pinCode = pinCode)
+            PinCodeBlock(
+                pinCode = pinCode,
+                display = pairingDisplay,
+                onSubmitRemotePasskey = { digits ->
+                    val address = viewModel.pairingDisplay.value?.address
+                    if (address != null) {
+                        hidController?.submitPairingPasskey(address, digits)
+                    }
+                },
+            )
         }
+
+        // 添加被控设备：扫描附近设备 → 点击发起配对（App 反客为主，不等对端来找本机）
+        AppleButton(
+            text = stringResource(R.string.pairing_add_device),
+            onClick = { showAddDevice = true },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp),
+            shape = RoundedCornerShape(16.dp),
+            containerColor = PureBlack,
+            contentColor = PureWhite,
+            borderColor = PureWhite.copy(alpha = 0.35f),
+            textStyle = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(14.dp))
 
         // 设备列表分区：已配对（平台已确认）/ 新发现（已 bond 未选平台）。
         // pairedDevices 里保留全部 bonded 设备（契约要求 + 五指横滑循环要用），
@@ -372,6 +424,15 @@ fun PairingScreen(
             },
             onDeviceLongClick = { device -> reselectDevice = device },
             onDeviceDelete = { device -> pendingDelete = device },
+            onToggleConnection = { device ->
+                if (device.address in connectedAddresses) {
+                    // 粘性断开：对端回连也不会自动恢复，点「连接」才恢复
+                    hidController?.disconnectHost(device.address)
+                } else {
+                    hidController?.setActiveDevice(device.address)
+                    hidController?.connectHost(device.address)
+                }
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f, fill = false)
@@ -426,6 +487,19 @@ fun PairingScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 8.dp),
+        )
+    }
+
+    // 添加被控设备：扫描列表弹窗，点击设备即 createBond 发起配对
+    if (showAddDevice) {
+        AddDeviceDialog(
+            scanner = scanner,
+            onPair = { device ->
+                showAddDevice = false
+                Log.i(TAG, "createBond from scan: ${device.address} (${device.name})")
+                scanner.createBond(device.address)
+            },
+            onDismiss = { showAddDevice = false },
         )
     }
 
@@ -534,10 +608,6 @@ fun PairingScreen(
     }
 }
 
-/** 生成 6 位数字配对码。 */
-private fun randomPinCode(): String =
-    Random.nextInt(from = 100000, until = 1000000).toString()
-
 /** 顶部：本机蓝牙名称 + 可被发现入口。 */
 @Composable
 private fun PairingHeader(
@@ -618,9 +688,24 @@ private fun PairingHeader(
     }
 }
 
-/** 页面中央：6 位数字配对码。 */
+/**
+ * 页面中央：配对码展示 / 收集（配对接管）。
+ *
+ * 屏幕上显示的数字 = **实际用来配对的数字**（修复「页面码与系统码不一致」）：
+ * - 空闲：固定配对码 [APP_PAIRING_PIN]（被控设备输 0000）；
+ * - [PairingDisplayKind.SHOW_APP_PIN]：同上，配对进行中；
+ * - [PairingDisplayKind.SHOW_SHARED_KEY]：数字比较的真实数字（两边一致，已自动确认）；
+ * - [PairingDisplayKind.SHOW_ENTRY_KEY]：本端展示的数字（在被控设备上输入）；
+ * - [PairingDisplayKind.NEED_REMOTE_KEY_INPUT]：输入框收集对端屏幕上的数字；
+ * - [PairingDisplayKind.AUTO_CONFIRMED]：无数字，已自动确认。
+ */
 @Composable
-private fun PinCodeBlock(pinCode: String?, modifier: Modifier = Modifier) {
+private fun PinCodeBlock(
+    pinCode: String?,
+    display: PairingDisplay?,
+    onSubmitRemotePasskey: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -632,33 +717,260 @@ private fun PinCodeBlock(pinCode: String?, modifier: Modifier = Modifier) {
             letterSpacing = 2.sp,
         )
         Spacer(modifier = Modifier.height(20.dp))
-        if (pinCode.isNullOrBlank()) {
-            Text(
+        when (display?.kind) {
+            PairingDisplayKind.NEED_REMOTE_KEY_INPUT -> RemotePasskeyInput(onSubmit = onSubmitRemotePasskey)
+            PairingDisplayKind.AUTO_CONFIRMED -> Text(
                 text = stringResource(R.string.pairing_pin_placeholder),
                 style = MaterialTheme.typography.displaySmall.copy(fontSize = 52.sp),
                 color = PureWhite.copy(alpha = 0.3f),
             )
-        } else {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                pinCode.take(PIN_LENGTH).forEach { digit ->
-                    Text(
-                        text = digit.toString(),
-                        style = MaterialTheme.typography.displaySmall.copy(fontSize = 52.sp),
-                        color = PureWhite,
-                    )
+            else -> {
+                // 空闲时 pinCode 为空 → 展示固定配对码 0000
+                val digits = pinCode?.takeIf { it.isNotBlank() } ?: APP_PAIRING_PIN
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    digits.take(PIN_LENGTH).forEach { digit ->
+                        Text(
+                            text = digit.toString(),
+                            style = MaterialTheme.typography.displaySmall.copy(fontSize = 52.sp),
+                            color = PureWhite,
+                        )
+                    }
                 }
             }
         }
         Spacer(modifier = Modifier.height(20.dp))
         Text(
-            text = stringResource(R.string.pairing_pin_hint),
+            text = stringResource(
+                when (display?.kind) {
+                    null -> R.string.pairing_pin_hint
+                    PairingDisplayKind.SHOW_APP_PIN -> R.string.pairing_pin_hint_app_pin
+                    PairingDisplayKind.SHOW_SHARED_KEY -> R.string.pairing_pin_hint_shared_key
+                    PairingDisplayKind.SHOW_ENTRY_KEY -> R.string.pairing_pin_hint_entry_key
+                    PairingDisplayKind.NEED_REMOTE_KEY_INPUT -> R.string.pairing_pin_hint_remote_input
+                    PairingDisplayKind.AUTO_CONFIRMED -> R.string.pairing_pin_hint_auto_confirmed
+                },
+            ),
             style = MaterialTheme.typography.bodyMedium,
             color = PureWhite.copy(alpha = 0.55f),
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(horizontal = 8.dp),
+        )
+    }
+}
+
+/**
+ * PASSKEY_ENTRY 配对：把对端屏幕上的数字转述进 App（对端展示 → 本端 `setPin` 应答）。
+ *
+ * 输满 [REMOTE_KEY_LENGTH] 位自动提交，也可点「提交」；提交后由 HID 层反射 `setPin`
+ * 完成应答，bond 结果由系统广播驱动回到空闲态。
+ */
+@Composable
+private fun RemotePasskeyInput(
+    onSubmit: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var text by remember { mutableStateOf("") }
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BasicTextField(
+            value = text,
+            onValueChange = { input ->
+                val digits = input.filter { it.isDigit() }.take(REMOTE_KEY_LENGTH)
+                text = digits
+                if (digits.length == REMOTE_KEY_LENGTH) onSubmit(digits)
+            },
+            singleLine = true,
+            textStyle = MaterialTheme.typography.displaySmall.copy(
+                fontSize = 40.sp,
+                color = PureWhite,
+            ),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.Transparent),
+            decorationBox = { inner ->
+                if (text.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.pairing_pin_input_placeholder),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = PureWhite.copy(alpha = 0.3f),
+                    )
+                }
+                inner()
+            },
+            modifier = Modifier
+                .width(220.dp)
+                .border(
+                    width = 1.dp,
+                    color = PureWhite.copy(alpha = 0.3f),
+                    shape = RoundedCornerShape(14.dp),
+                )
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        AppleButton(
+            text = stringResource(R.string.pairing_pin_submit),
+            onClick = { if (text.isNotEmpty()) onSubmit(text) },
+            enabled = text.isNotEmpty(),
+            shape = RoundedCornerShape(14.dp),
+            containerColor = Color.Transparent,
+            contentColor = PureWhite,
+            borderColor = PureWhite.copy(alpha = 0.35f),
+            textStyle = MaterialTheme.typography.bodyLarge,
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            touchPadding = PaddingValues(vertical = 6.dp),
+            modifier = Modifier.height(44.dp),
+        )
+    }
+}
+
+/** 对端 passkey 位数（SSP passkey 为 6 位数字）。 */
+private const val REMOTE_KEY_LENGTH = 6
+
+/** 扫描兜底超时（ms）：经典 inquiry 约 12s，广播收尾丢失时强制结束「正在扫描」态。 */
+private const val SCAN_TIMEOUT_MILLIS = 13_500L
+
+/**
+ * 「添加被控设备」弹窗：扫描附近蓝牙设备，点击即发起配对（`createBond`）。
+ *
+ * 打开即开始经典蓝牙扫描（约 12s），结束显示「重新扫描」；点击设备后关闭弹窗，
+ * 配对流程交回主页面的配对码区（自动应答 + 真实配对码展示）。
+ */
+@Composable
+private fun AddDeviceDialog(
+    scanner: DeviceScanner,
+    onPair: (ScannedDevice) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var scanning by remember { mutableStateOf(false) }
+    var scanFailed by remember { mutableStateOf(false) }
+    var devices by remember { mutableStateOf(listOf<ScannedDevice>()) }
+    var scanSeq by remember { mutableIntStateOf(0) }
+
+    fun startScan() {
+        devices = emptyList()
+        scanFailed = false
+        scanSeq += 1
+        val started = scanner.startScan(object : ScanListener {
+            override fun onScanStarted() {
+                scanning = true
+            }
+
+            override fun onDeviceFound(device: ScannedDevice) {
+                devices = (devices.filterNot { it.address == device.address } + device)
+                    .sortedBy { it.name.lowercase() }
+            }
+
+            override fun onScanFinished() {
+                scanning = false
+            }
+        })
+        scanFailed = !started
+        scanning = started
+    }
+
+    // 兜底：inquiry 约 12s 自然结束（ACTION_DISCOVERY_FINISHED 收尾）；万一广播迟到 /
+    // 丢失，13.5s 后强制退出「正在扫描」态，不让 UI 永远转圈（同「连接中」永挂教训）
+    LaunchedEffect(scanSeq) {
+        if (scanSeq > 0) {
+            delay(SCAN_TIMEOUT_MILLIS)
+            scanning = false
+        }
+    }
+
+    LaunchedEffect(Unit) { startScan() }
+    DisposableEffect(Unit) {
+        onDispose { scanner.stopScan() }
+    }
+
+    MinimalDialog(onDismiss = { scanner.stopScan(); onDismiss() }) {
+        Text(
+            text = stringResource(R.string.pairing_scan_title),
+            style = MaterialTheme.typography.titleLarge,
+            color = PureWhite,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.pairing_scan_hint),
+            style = MaterialTheme.typography.bodyMedium,
+            color = PureWhite.copy(alpha = 0.6f),
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+        Text(
+            text = when {
+                scanFailed -> stringResource(R.string.pairing_scan_failed)
+                scanning -> stringResource(R.string.pairing_scan_scanning)
+                devices.isEmpty() -> stringResource(R.string.pairing_scan_empty_finished)
+                else -> stringResource(R.string.pairing_scan_scanning)
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = PureWhite.copy(alpha = 0.45f),
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 280.dp)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            devices.forEach { device ->
+                ScannedDeviceRow(device = device, onClick = { onPair(device) })
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(onClick = { scanner.stopScan(); onDismiss() }) {
+                Text(
+                    text = stringResource(R.string.pairing_scan_cancel),
+                    color = PureWhite.copy(alpha = 0.6f),
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            TextButton(onClick = { startScan() }, enabled = !scanning) {
+                Text(
+                    text = stringResource(R.string.pairing_scan_rescan),
+                    color = if (scanning) PureWhite.copy(alpha = 0.3f) else PureWhite,
+                )
+            }
+        }
+    }
+}
+
+/** 扫描结果里的单台设备：平台图标 + 名称，点击发起配对。 */
+@Composable
+private fun ScannedDeviceRow(
+    device: ScannedDevice,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MinimalGray)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PlatformIcon(
+            platform = device.platform,
+            contentDescription = null,
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = device.name,
+            style = MaterialTheme.typography.bodyLarge,
+            color = PureWhite,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
         )
     }
 }
@@ -677,6 +989,7 @@ private fun PinCodeBlock(pinCode: String?, modifier: Modifier = Modifier) {
  * @param onDeviceClick 点击行（已确认 = 切换控制目标；未确认 = 弹平台选择）
  * @param onDeviceLongClick 长按行（重新选择平台）
  * @param onDeviceDelete 侧滑露出删除并确认后回调（removeBond + 清 DataStore）
+ * @param onToggleConnection 行内「连接 / 断开」按钮（被控设备连接管理由 App 控制）
  * @param connectingAddress 正在主动连接的地址（A2：行内「连接中…」）
  * @param connectFailedAddress 最近一次主动连接下发失败的地址（A2：行内「连接失败」）
  */
@@ -691,6 +1004,7 @@ private fun DeviceSections(
     onDeviceClick: (PairedDevice) -> Unit,
     onDeviceLongClick: (PairedDevice) -> Unit,
     onDeviceDelete: (PairedDevice) -> Unit,
+    onToggleConnection: (PairedDevice) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -709,6 +1023,7 @@ private fun DeviceSections(
             onDeviceClick = onDeviceClick,
             onDeviceLongClick = onDeviceLongClick,
             onDeviceDelete = onDeviceDelete,
+            onToggleConnection = onToggleConnection,
         )
         Spacer(modifier = Modifier.height(20.dp))
         DeviceSection(
@@ -722,6 +1037,7 @@ private fun DeviceSections(
             onDeviceClick = onDeviceClick,
             onDeviceLongClick = onDeviceLongClick,
             onDeviceDelete = onDeviceDelete,
+            onToggleConnection = onToggleConnection,
         )
     }
 }
@@ -739,6 +1055,7 @@ private fun DeviceSection(
     onDeviceClick: (PairedDevice) -> Unit,
     onDeviceLongClick: (PairedDevice) -> Unit,
     onDeviceDelete: (PairedDevice) -> Unit,
+    onToggleConnection: (PairedDevice) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -768,6 +1085,7 @@ private fun DeviceSection(
                 onClick = { onDeviceClick(device) },
                 onLongClick = { onDeviceLongClick(device) },
                 onDelete = { onDeviceDelete(device) },
+                onToggleConnection = { onToggleConnection(device) },
             )
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -798,6 +1116,7 @@ private fun DeviceRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onDelete: () -> Unit,
+    onToggleConnection: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val revealWidthPx = with(LocalDensity.current) { SWIPE_REVEAL_WIDTH.toPx() }
@@ -938,10 +1257,10 @@ private fun DeviceRow(
                     color = PureWhite.copy(alpha = 0.5f),
                 )
             }
-            // 角标列：「已连接 / 连接中… / 连接失败」（A2 状态流转）+「当前控制目标」
-            if (connected || connecting || connectFailed || selected) {
-                Spacer(modifier = Modifier.width(8.dp))
-                Column(horizontalAlignment = Alignment.End) {
+            // 右侧列：状态角标 + 连接 / 断开动作同一行（控制行高），「当前控制目标」次行
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(horizontalAlignment = Alignment.End) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     when {
                         connected -> Badge(text = stringResource(R.string.pairing_device_connected))
                         connecting -> Badge(
@@ -956,11 +1275,18 @@ private fun DeviceRow(
                         )
                     }
                     if (connected || connecting || connectFailed) {
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                     }
-                    if (selected) {
-                        Badge(text = stringResource(R.string.pairing_device_active))
-                    }
+                    // 行内显式连接 / 断开：被控设备的连接生命周期由 App 控制
+                    ConnectionActionPill(
+                        connected = connected,
+                        connecting = connecting,
+                        onClick = onToggleConnection,
+                    )
+                }
+                if (selected) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Badge(text = stringResource(R.string.pairing_device_active))
                 }
             }
         }
@@ -991,6 +1317,41 @@ private fun Badge(
             maxLines = 1,
         )
     }
+}
+
+/**
+ * 行内「连接 / 断开」胶囊按钮：被控设备连接管理的显式入口。
+ *
+ * 文案只有「连接 / 断开」两个动作词（状态由旁边的状态角标表达，不重复文案）：
+ * 未连接 →「连接」发起 HID 连接；连接中 → 禁用（重复点会干扰状态机）；
+ * 已连接 →「断开」（粘性断开，对端回连也不会自动恢复）。
+ */
+@Composable
+private fun ConnectionActionPill(
+    connected: Boolean,
+    connecting: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val label = if (connected) {
+        stringResource(R.string.pairing_device_action_disconnect)
+    } else {
+        stringResource(R.string.pairing_device_action_connect)
+    }
+    AppleButton(
+        text = label,
+        onClick = onClick,
+        enabled = !connecting,
+        modifier = modifier.height(30.dp),
+        shape = RoundedCornerShape(percent = 50),
+        containerColor = Color.Transparent,
+        contentColor = PureWhite.copy(alpha = 0.85f),
+        borderColor = PureWhite.copy(alpha = 0.35f),
+        textStyle = MaterialTheme.typography.bodySmall,
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        // 视觉 30dp，上下各外扩 6dp 热区到 42dp（连续行里不误触即可）
+        touchPadding = PaddingValues(vertical = 6.dp),
+    )
 }
 
 /** 侧滑露出的删除操作：红色底 + 白色「删除」胶囊。 */

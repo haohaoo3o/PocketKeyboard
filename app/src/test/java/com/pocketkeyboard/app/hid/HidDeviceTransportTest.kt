@@ -30,6 +30,11 @@ class HidDeviceTransportTest {
         val connectCalls = mutableListOf<String>()
         val bonded = mutableListOf<HidHost>()
         val connected = mutableListOf<HidHost>()
+
+        /** registerApp 下发次数（断言兜底补注册有没有多发）。 */
+        var registerAppCalls = 0
+            private set
+
         private var callback: HidProfileCallback? = null
 
         fun fireOpen() {
@@ -57,6 +62,7 @@ class HidDeviceTransportTest {
             callback: HidProfileCallback,
         ): Boolean {
             sdpRecord = sdp
+            registerAppCalls += 1
             this.callback = callback
             return registerAppAccepted
         }
@@ -74,7 +80,14 @@ class HidDeviceTransportTest {
             return !connectShouldFail
         }
 
-        override fun disconnect(address: String): Boolean = true
+        /** disconnect 调用计数（卡死收尾推动的断言用）。 */
+        var disconnectCalls = 0
+            private set
+
+        override fun disconnect(address: String): Boolean {
+            disconnectCalls += 1
+            return true
+        }
 
         override fun sendReport(address: String, reportId: Int, data: ByteArray): Boolean {
             sentReports.add(SentReport(address, reportId, data))
@@ -90,11 +103,24 @@ class HidDeviceTransportTest {
 
         override fun connectedHosts(): List<HidHost> = connected
 
+        /** 逐地址状态覆盖（模拟 DISCONNECTING 卡死等系统真值）。 */
+        val connectionStateOverrides = mutableMapOf<String, Int>()
+
         override fun connectionState(address: String): Int =
-            if (connected.any { it.address == address }) HidHostRegistry.STATE_CONNECTED
-            else HidHostRegistry.STATE_DISCONNECTED
+            connectionStateOverrides[address]
+                ?: if (connected.any { it.address == address }) HidHostRegistry.STATE_CONNECTED
+                else HidHostRegistry.STATE_DISCONNECTED
 
         override fun bondedHosts(): List<HidHost> = bonded
+
+        /** setLocalName 调用记录（广播名 PocketKeyboard-<品牌> 接线断言用）。 */
+        var localName: String? = null
+            private set
+
+        override fun setLocalName(name: String): Boolean {
+            localName = name
+            return true
+        }
 
         // ---- 触发 SDK 回调 ----
         fun appStatus(plugged: String?, registered: Boolean) =
@@ -125,9 +151,7 @@ class HidDeviceTransportTest {
             started = false
         }
 
-        fun emit(event: BondEvent) {
-            listener?.onBondEvent(event)
-        }
+        fun emit(event: BondEvent): Boolean = listener?.onBondEvent(event) ?: false
     }
 
     private class FakeScheduler : ReconnectScheduler {
@@ -218,10 +242,12 @@ class HidDeviceTransportTest {
         }
     }
 
-    /** 记录调用的假配对应答器（Bug 2a 接线测试用）。 */
+    /** 记录调用的假配对应答器（配对接管接线测试用）。 */
     private class RecordingResponder : PairingResponder {
         val calls = mutableListOf<Triple<String, HidPairingVariant, Int?>>()
+        val submitCalls = mutableListOf<Pair<String, String>>()
         var answer: PairingAnswer = PairingAnswer.PIN_ANSWERED
+        var submitAnswer: PairingAnswer = PairingAnswer.PIN_ANSWERED
 
         override fun answer(
             address: String,
@@ -230,6 +256,22 @@ class HidDeviceTransportTest {
         ): PairingAnswer {
             calls.add(Triple(address, variant, passkey))
             return answer
+        }
+
+        override fun submitPasskey(address: String, passkey: String): PairingAnswer {
+            submitCalls.add(address to passkey)
+            return submitAnswer
+        }
+    }
+
+    /** 记录调用的假蓝牙栈重启器（注册楔死二级自愈测试用）。 */
+    private class RecordingResetter(private val result: Boolean) : BluetoothStackResetter {
+        var calls = 0
+            private set
+
+        override fun reset(onResult: (Boolean) -> Unit) {
+            calls += 1
+            onResult(result)
         }
     }
 
@@ -251,6 +293,8 @@ class HidDeviceTransportTest {
         scheduler: FakeScheduler = FakeScheduler(),
         responder: PairingResponder = NoOpPairingResponder(),
         appInForeground: () -> Boolean = { true },
+        stackResetter: BluetoothStackResetter = BluetoothStackResetter.UNAVAILABLE,
+        broadcastName: String = BroadcastName.PREFIX,
     ): Harness {
         val transport = HidDeviceTransport(
             statusListener = listener,
@@ -259,6 +303,8 @@ class HidDeviceTransportTest {
             reconnectScheduler = scheduler,
             pairingResponder = responder,
             appInForeground = appInForeground,
+            stackResetter = stackResetter,
+            broadcastName = broadcastName,
         )
         return Harness(transport, listener, gateway, bondSource, scheduler)
     }
@@ -279,13 +325,27 @@ class HidDeviceTransportTest {
 
         assertNotNull(gateway.sdpRecord)
         val sdp = gateway.sdpRecord!!
-        assertEquals("口袋键鼠", sdp.name)
+        assertEquals(BroadcastName.PREFIX, sdp.name)
         assertEquals("蓝牙键盘与触控板", sdp.description)
-        assertEquals("口袋键鼠", sdp.provider)
+        assertEquals("PocketKeyboard", sdp.provider)
         assertEquals(0xC0, sdp.subclass and 0xFF) // SUBCLASS1_COMBO
         assertArrayEquals(HidReportDescriptor.bytes, sdp.descriptors)
         assertTrue(transport.isAppRegistered)
         assertEquals(null, listener.unavailable)
+    }
+
+    @Test
+    fun `broadcast name is applied to the adapter and the sdp record`() {
+        val gateway = FakeGateway()
+        val h = harness(gateway = gateway, broadcastName = "PocketKeyboard-redmi")
+
+        h.transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        // 被控设备看到的广播名（GAP）与 SDP 记录名一致：与手机系统名明确区分
+        assertEquals("PocketKeyboard-redmi", gateway.localName)
+        assertEquals("PocketKeyboard-redmi", gateway.sdpRecord?.name)
     }
 
     @Test
@@ -312,8 +372,8 @@ class HidDeviceTransportTest {
         transport.start()
         gateway.fireOpen()
 
-        // 真结果只看回调：回调缺席时先自愈，而不是立刻判死（MIUI 怪癖：App 重启后的
-        // 首次注册会被服务端静默弹回，unregisterApp 清残留 + 重注册才能恢复）
+        // 真结果只看回调：回调缺席时先自愈，而不是立刻判死（MIUI 怪癖：force-stop 后
+        // 服务端残留注册弹回一切 registerApp，unregisterApp 清残留 + 重注册兜一层）
         assertNull(listener.unavailable)
 
         // 3 轮自愈：看门狗 → unregisterApp 清残留 + 重建代理 → 重注册（均不上报）
@@ -323,10 +383,80 @@ class HidDeviceTransportTest {
             h.gateway.fireOpen()
             assertNull(listener.unavailable)
         }
-        // 第 4 次看门狗到期：自愈轮数用尽 → 才上报注册被拒
+        // 第 4 次看门狗到期：自愈轮数用尽 → 二级恢复（蓝牙栈重启）；
+        // 默认 UNAVAILABLE（无 root 优雅降级）立即失败 → 才上报注册被拒
         h.scheduler.runPending("#registration-watchdog")
         assertEquals(HidUnavailableReason.REGISTRATION_REJECTED, listener.unavailable)
         assertTrue(gateway.unregisterAppCalls >= 3)
+    }
+
+    @Test
+    fun `stack reset success re-arms registration instead of reporting rejected`() {
+        val resetter = RecordingResetter(result = true)
+        val gateway = FakeGateway().apply { registerAppAccepted = false }
+        val h = harness(gateway = gateway, stackResetter = resetter)
+        h.transport.start()
+        gateway.fireOpen()
+
+        // 3 轮 unregister 自愈耗尽 → 第 4 次看门狗触发蓝牙栈重启（root 路径）
+        repeat(3) {
+            h.scheduler.runPending("#registration-watchdog")
+            h.scheduler.runPending("#registration-retry")
+            gateway.fireOpen()
+        }
+        h.scheduler.runPending("#registration-watchdog")
+
+        assertEquals(1, resetter.calls)
+        // 重启成功 ≠ 注册失败：此刻不应上报不可用
+        assertNull(h.listener.unavailable)
+        // 兜底补注册调度已挂上（正常路径由适配器 ON 广播抢先，这条不执行）
+        assertTrue(h.scheduler.pending.containsKey("#registration-after-reset"))
+
+        // 正常恢复路径：适配器重启完成的 ON 广播 → 重新取代理 → 注册（轮数已清零）
+        h.bondSource.emit(BondEvent.AdapterStateChanged(true))
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        assertTrue(h.transport.isAppRegistered)
+        assertNull(h.listener.unavailable)
+
+        // 已注册状态下兜底补注册必须自我取消，不能多发一次 registerApp
+        val callsBefore = gateway.registerAppCalls
+        h.scheduler.runPending("#registration-after-reset")
+        assertEquals(callsBefore, gateway.registerAppCalls)
+    }
+
+    @Test
+    fun `stack reset failure reports rejected and is attempted only once`() {
+        val resetter = RecordingResetter(result = false)
+        val gateway = FakeGateway().apply { registerAppAccepted = false }
+        val h = harness(gateway = gateway, stackResetter = resetter)
+        h.transport.start()
+        gateway.fireOpen()
+
+        // 第一轮耗尽：重启器被调用一次，失败 → 立即上报（普通用户无 root 的降级路径）
+        repeat(3) {
+            h.scheduler.runPending("#registration-watchdog")
+            h.scheduler.runPending("#registration-retry")
+            gateway.fireOpen()
+        }
+        h.scheduler.runPending("#registration-watchdog")
+        assertEquals(1, resetter.calls)
+        assertEquals(HidUnavailableReason.REGISTRATION_REJECTED, h.listener.unavailable)
+
+        // 用户开关蓝牙后适配器 ON 再来一轮：轮数清零重试，但重启器绝不重复执行
+        h.listener.unavailable = null
+        h.bondSource.emit(BondEvent.AdapterStateChanged(true))
+        gateway.fireOpen()
+        repeat(3) {
+            h.scheduler.runPending("#registration-watchdog")
+            h.scheduler.runPending("#registration-retry")
+            gateway.fireOpen()
+        }
+        h.scheduler.runPending("#registration-watchdog")
+
+        assertEquals(1, resetter.calls)
+        assertEquals(HidUnavailableReason.REGISTRATION_REJECTED, h.listener.unavailable)
     }
 
     @Test
@@ -1110,5 +1240,191 @@ class HidDeviceTransportTest {
 
         assertEquals(Triple(false, true, false), listener.leds)
         assertEquals(0x02, transport.ledState)
+    }
+
+    // ---------------------------------------------------------------- 配对接管（抑制系统配对框）
+
+    @Test
+    fun `pairing request is consumed when the app takes over`() {
+        val responder = RecordingResponder().apply { answer = PairingAnswer.PIN_ANSWERED }
+        val h = harness(responder = responder)
+        h.transport.start()
+        h.gateway.fireOpen()
+        h.gateway.appStatus(null, true)
+
+        // 已代劳应答 → 事件源应 abortBroadcast 抑制系统配对框
+        assertTrue(
+            h.bondSource.emit(BondEvent.PairingRequest(host.address, HidPairingVariant.PIN, null)),
+        )
+    }
+
+    @Test
+    fun `passkey entry is consumed while waiting for user input`() {
+        val responder = RecordingResponder().apply { answer = PairingAnswer.NEED_USER_INPUT }
+        val h = harness(responder = responder)
+        h.transport.start()
+        h.gateway.fireOpen()
+        h.gateway.appStatus(null, true)
+
+        // App 内收集对端码：系统配对框不出现（否则双输入框抢 setPin）
+        assertTrue(
+            h.bondSource.emit(
+                BondEvent.PairingRequest(host.address, HidPairingVariant.PASSKEY_ENTRY, null),
+            ),
+        )
+    }
+
+    @Test
+    fun `pairing request is not consumed when the answer is skipped or failed`() {
+        val responder = RecordingResponder().apply { answer = PairingAnswer.FAILED }
+        val h = harness(responder = responder)
+        h.transport.start()
+        h.gateway.fireOpen()
+        h.gateway.appStatus(null, true)
+
+        // 没接管成功必须放行系统配对框兜底，绝不把用户卡在无处应答
+        assertFalse(
+            h.bondSource.emit(
+                BondEvent.PairingRequest(host.address, HidPairingVariant.PASSKEY_CONFIRMATION, 1),
+            ),
+        )
+    }
+
+    @Test
+    fun `pairing request is not consumed when app is in background`() {
+        val responder = RecordingResponder().apply { answer = PairingAnswer.PIN_ANSWERED }
+        val h = harness(responder = responder, appInForeground = { false })
+        h.transport.start()
+        h.gateway.fireOpen()
+        h.gateway.appStatus(null, true)
+
+        assertFalse(
+            h.bondSource.emit(BondEvent.PairingRequest(host.address, HidPairingVariant.PIN, null)),
+        )
+        assertTrue(responder.calls.isEmpty())
+    }
+
+    @Test
+    fun `submitPairingPasskey delegates to the responder`() {
+        val responder = RecordingResponder()
+        val h = harness(responder = responder)
+
+        h.transport.submitPairingPasskey(host.address, "246810")
+
+        assertEquals(listOf(host.address to "246810"), responder.submitCalls)
+    }
+
+    // ---------------------------------------------------------------- 连接看门狗 + 系统真值对账
+
+    @Test
+    fun `stuck connecting fails after watchdog ticks and schedules a retry`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.connectHost(host.address)
+        assertEquals(listOf(host.address), gateway.connectCalls)
+
+        // connect 下发后再无回调（MIUI 实测会丢）：连续对账 tick 判卡死
+        h.scheduler.runPending("#reconcile-tick")
+        h.scheduler.runPending("#reconcile-tick")
+        assertEquals(emptyList<String>(), h.listener.connectFailed)
+
+        h.scheduler.runPending("#reconcile-tick")
+        // 判失败 → UI「连接失败」+ 退避重试排队，「连接中」绝不永久挂住
+        assertEquals(listOf(host.address), h.listener.connectFailed)
+        assertFalse(transport.registry.isConnected(host.address))
+        assertTrue(h.scheduler.pending.containsKey(host.address))
+    }
+
+    @Test
+    fun `reconcile tick promotes system truth connected when the callback was lost`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+        assertFalse(transport.registry.isConnected(host.address))
+
+        // 系统侧其实连上了（回调丢失场景）
+        gateway.connected.add(host)
+        h.scheduler.runPending("#reconcile-tick")
+
+        assertTrue(transport.registry.isConnected(host.address))
+        assertEquals(setOf(host.address), h.listener.connectedAddresses)
+    }
+
+    @Test
+    fun `reconcile tick demotes stale connected when the system says disconnected`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+        assertTrue(transport.registry.isConnected(host.address))
+
+        // 断开回调丢失：系统真值已断开，registry 还标着已连接
+        h.scheduler.runPending("#reconcile-tick")
+
+        assertFalse(transport.registry.isConnected(host.address))
+        assertTrue(h.listener.disconnectedHosts.contains(host.address))
+    }
+
+    @Test
+    fun `wedged disconnecting state is nudged with an extra disconnect`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        // MIUI 实测：disconnect 收尾回调丢失后 HID 状态机永久停在 DISCONNECTING，
+        // 挡死后续 connect。看门狗判卡死后应补发 disconnect 推动收尾再重试
+        gateway.connectionStateOverrides[host.address] = HidHostRegistry.STATE_DISCONNECTING
+        transport.connectHost(host.address)
+        assertEquals(1, gateway.disconnectCalls) // connectHost 前的推动
+
+        h.scheduler.runPending("#reconcile-tick")
+        h.scheduler.runPending("#reconcile-tick")
+        h.scheduler.runPending("#reconcile-tick")
+
+        assertTrue(gateway.disconnectCalls >= 2) // 卡死路径再推动一次
+        assertTrue(h.scheduler.pending.containsKey(host.address))
+    }
+
+    @Test
+    fun `manual disconnect is sticky against host reconnects`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+
+        transport.disconnectHost(host.address)
+        assertFalse(transport.registry.isConnected(host.address))
+
+        // 对端立刻回连（回调 + 系统真值轮询两条通道都出现 connected）：粘性断开顶住
+        gateway.connected.add(host)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+        h.scheduler.runPending("#reconcile-tick")
+        assertFalse(transport.registry.isConnected(host.address))
+
+        // 明确点「连接」才恢复
+        transport.connectHost(host.address)
+        assertEquals(listOf(host.address), gateway.connectCalls)
     }
 }

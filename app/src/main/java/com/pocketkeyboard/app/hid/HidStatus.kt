@@ -47,22 +47,35 @@ enum class HidBondState {
  * 系统配对请求变体，对应 `BluetoothDevice.PAIRING_VARIANT_*`。
  *
  * Android 手机作为 HID **外设**时，配对通常由对端主机发起，因此常见的是
- * [PASSKEY_CONFIRMATION]（数字比较，系统弹框显示 6 位数字）与 [CONSENT]（Just Works）。
+ * [PASSKEY_CONFIRMATION]（数字比较，两边显示同一 6 位数字）与 [DISPLAY]
+ * （本端生成数字，用户在被控设备上输入）。
+ *
+ * 与 AOSP `BluetoothDevice` 常量的对应：PIN=0、PASSKEY(=PASSKEY_ENTRY)=1、
+ * PASSKEY_CONFIRMATION=2、CONSENT=3、DISPLAY_PASSKEY=4、DISPLAY_PIN=5、
+ * OOB_CONSENT=6、PIN_16_DIGITS=7。
  */
 enum class HidPairingVariant {
-    /** 对端要求输入 PIN（本端极少见）。 */
+    /** 对端要求输入 PIN：应答 `setPin(App 配对码)`，用户在被控设备上输入同一个码。 */
     PIN,
 
-    /** 数字比较：系统弹框显示 6 位数字，用户点「配对」。 */
+    /** 数字比较：两边显示同一 6 位数字，应答 `setPairingConfirmation(true)`。 */
     PASSKEY_CONFIRMATION,
 
-    /** Just Works：无按键确认。 */
+    /** Just Works：无数字确认，应答 `setPairingConfirmation(true)`。 */
     CONSENT,
 
-    /** 对端要求输入 passkey。 */
+    /** 对端展示 passkey，要求在本端键盘输入：应答 `setPin(用户输入的数字)`。 */
     PASSKEY_ENTRY,
 
-    /** OOB / DISPLAY_PASSKEY / DISPLAY_PIN 等带外或展示类变体。 */
+    /**
+     * 本端展示 passkey / PIN（DISPLAY_PASSKEY=4 / DISPLAY_PIN=5），用户在被控设备上输入。
+     *
+     * **不需要任何应答**（数字由系统控制器生成，随广播 EXTRA_PAIRING_KEY 给出），
+     * App 只负责把它显示出来；误调 `setPin` 会破坏配对流程。
+     */
+    DISPLAY,
+
+    /** OOB / PIN_16_DIGITS 等带外或罕见变体：不干预，走系统配对框。 */
     OOB,
 
     /** 未知变体。 */
@@ -150,6 +163,15 @@ interface HidStatusListener {
      *                     UI 用它作为 `MainViewModel.pinCode` 的兜底显示。
      */
     fun onPairingRequest(address: String, variant: HidPairingVariant, pinOrPasskey: Int?) {}
+
+    /**
+     * 配对自动应答结果（[onPairingRequest] 之后紧跟一次）。
+     *
+     * UI 据此切换提示：应答成功 → 「已自动确认」；被平台封锁（`setPairingConfirmation` /
+     * `setPin` 需要 `BLUETOOTH_PRIVILEGED`，普通应用调用抛 SecurityException）→
+     * 提示引导用户在系统配对框完成确认，**绝不谎称已自动确认**。
+     */
+    fun onPairingAutoAnswered(address: String, answer: PairingAnswer) {}
 
     /** 连接不可用（方案 B 或运行期降级），UI 展示对应中文提示。 */
     fun onUnavailable(reason: HidUnavailableReason) {}

@@ -130,6 +130,75 @@ fun Modifier.pocketGestures(
     )
 }
 
+/**
+ * 一次触摸序列的「强制复位」策略（纯函数，JVM 单测覆盖）：所有指针抬起的那一个
+ * 事件上，把闸门与仲裁器收敛到可安全进入下一次触摸的终态。
+ *
+ * ## 为什么不能一律 `arbiter.reset()`
+ *
+ * 触控板层用 `StateFlow.first { ... }` 观察归属：`releaseToTrackpad()` 刚写下的
+ * `TRACKPAD` 如果在**同一批**代码里又被 `reset()` 清回 `UNDECIDED`，中间值可能被
+ * StateFlow 的 conflation 吞掉——触控板层永远等不到裁决，只能熬满安全超时（真机
+ * 症状 2 的卡死来源之一）。因此终态按当前归属分流：
+ *
+ * - `FIVE_FINGER` → `reset()`：触控板层在 claim 的那一刻就已经拿到过 `FIVE_FINGER`
+ *   （claim 与结束至少隔一个事件），清掉只是防陈旧声明带进下一轮；
+ * - `UNDECIDED` → `releaseToTrackpad()`：五指层没来得及表态序列就结束了（异常退出 /
+ *   手势协程被 `resetPointerInputHandler` 取消）。交还给触控板层，解挂还在
+ *   `awaitGestureOwner` 里等裁决的等待者，免于 1.5s 超时兜底；
+ * - `TRACKPAD` → 保持不动：正常的放手裁决，触控板层可能还没观察到；下一轮
+ *   `GestureArbiter.onGestureStart()` 会把它清回未裁定。
+ *
+ * 闸门（[FiveFingerGate]）没有「等待被观察方」，任何时候都在序列末尾立刻清零：
+ * 同一事件稍后的 Main pass 上，输入区 `clickable` / 按键层就会读它（症状 3a 的门控）。
+ *
+ * 调用点有两处：五指层每轮手势的 `finally`（含协程被取消的路径）与独立的
+ * [Modifier.gestureStateSelfHeal] 观察层（兜底）。
+ */
+internal fun endOfTouchSequence(arbiter: GestureArbiter, gate: FiveFingerGate?) {
+    gate?.reset()
+    when (arbiter.owner.value) {
+        GestureOwner.FIVE_FINGER -> arbiter.reset()
+        GestureOwner.UNDECIDED -> arbiter.releaseToTrackpad()
+        GestureOwner.TRACKPAD -> Unit
+    }
+}
+
+/**
+ * 「触摸序列结束即强制复位」自愈层（问题 3a / 2 的兜底防线）。
+ *
+ * 挂在与 [pocketGestures] 同一个页面容器 Box 上，独立协程、零业务状态：只盯
+ * 「本次触摸序列所有指针抬起」的那一个事件（含 Compose 对 `ACTION_CANCEL` 合成的
+ * 全抬起事件），命中即调用 [endOfTouchSequence] 强制收敛闸门与仲裁器。
+ *
+ * 为什么必须有独立的一层：五指层自身的复位写在它的手势协程里，而该协程可能在
+ * 复位之前就被取消（`SuspendingPointerInputModifierNodeImpl.resetPointerInputHandler`：
+ * 密度 / 视图配置变化、`AndroidComposeView.coroutineContext` 更换都会走到）——
+ * 协程一死，`FiveFingerGate.pendingFingers / claimed` 就永久停在让位态，输入区
+ * `clickable` 被门控永久拦截（真机「系统键盘完全打不开」的卡死路径）。本层的协程
+ * 没有任何超时 / 状态机，不持有跨序列状态，被重置后也能干净重启，因此可以在
+ * 主手势层失能时接管复位。
+ */
+@Composable
+fun Modifier.gestureStateSelfHeal(
+    arbiter: GestureArbiter,
+    gate: FiveFingerGate,
+): Modifier = this.then(
+    Modifier.pointerInput(arbiter, gate) {
+        awaitEachGesture {
+            // 等到「本次序列全部指针抬起」的事件：awaitEachGesture 每轮从序列起点开始，
+            // 本循环读 Initial pass（父层最先看到），抬起后当前 currentEvent 即全空，
+            // 外层框架的 awaitAllPointersUp 检查到已全抬起会直接进入下一轮、不会挂起
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.changes.none { it.pressed }) break
+            }
+            endOfTouchSequence(arbiter, gate)
+            PocketGestureLog.trace("触摸序列结束 → 强制复位闸门/仲裁（自愈层）")
+        }
+    },
+)
+
 
 /**
  * 五指挥势识别主循环。
@@ -201,48 +270,51 @@ private suspend fun PointerInputScope.detectPocketGestures(
     val swipeThresholdPx = GestureConstants.SWIPE_DISTANCE.toPx()
     val gatherSlopPx = GestureConstants.FINGER_GATHER_MOVE_SLOP.toPx()
     awaitEachGesture {
-        // 读 Initial pass：父节点先于子节点看到事件，抢在按键 / 触控板之前表态
-        val firstDown = awaitFirstDownOnPass()
+        // finally 是复位路径审计（问题 3a / 2）后的关键改动：正常路径在 awaitAllPointersUp
+        // 之后收敛，而协程被取消（ACTION_CANCEL 之外的 handler 重置——密度 / 视图配置
+        // 变化、AndroidComposeView.coroutineContext 更换）时原代码**任何复位都到不了**，
+        // 闸门 / 仲裁器永久停在让位态。finally 里的 endOfTouchSequence 非挂起、可安全
+        // 在取消路径上执行；正常路径它是幂等的第二道保险
+        try {
+            // 读 Initial pass：父节点先于子节点看到事件，抢在按键 / 触控板之前表态
+            val firstDown = awaitFirstDownOnPass()
 
-        val gathered = awaitFiveFingersGathered(firstDown, gatherSlopPx, handler, gate)
-        if (gathered == null) {
-            // 明确不是五指挥势：立刻释放，触控板层的 awaitGestureOwner 随即返回 TRACKPAD
-            arbiter.releaseToTrackpad()
+            val gathered = awaitFiveFingersGathered(firstDown, gatherSlopPx, handler, gate)
+            if (gathered == null) {
+                // 明确不是五指挥势：立刻释放，触控板层的 awaitGestureOwner 随即返回 TRACKPAD
+                arbiter.releaseToTrackpad()
+                awaitAllPointersUp()
+                return@awaitEachGesture
+            }
+
+            // 抢到归属：触控板层的 awaitGestureOwner 会立刻返回 FIVE_FINGER 并放弃本次手势
+            arbiter.claimFiveFinger()
+            gate()?.observeGather(fingerCount = gathered.pressedCount, claimed = true)
+            PocketGestureLog.decision(
+                "凑满 ${gathered.pressedCount} 指 → 接管手势，" +
+                    "横滑阈值 ${"%.0f".format(swipeThresholdPx)}px",
+            )
+
+            val initialPoints = gathered.event.changes.filter { it.pressed }.toFingerPoints()
+            val initial = fiveFingerGeometry(initialPoints)
+            if (initial == null) {
+                // 理论上不会发生（上面已确认 ≥5 指），防御性处理
+                PocketGestureLog.warn("凑满 ${gathered.pressedCount} 指却算不出几何，放弃本轮")
+                awaitAllPointersUp()
+                return@awaitEachGesture
+            }
+
+            PocketGestureLog.trace(
+                "初始几何 质心(${"%.0f".format(initial.centroidX)}, " +
+                    "${"%.0f".format(initial.centroidY)}) 平均间距 ${"%.0f".format(initial.meanSpacing)}px",
+            )
+
+            trackAndFireFiveFingerGesture(initial, swipeThresholdPx, handler)
+
             awaitAllPointersUp()
-            arbiter.reset()
-            gate()?.reset()
-            return@awaitEachGesture
+        } finally {
+            endOfTouchSequence(arbiter, gate())
         }
-
-        // 抢到归属：触控板层的 awaitGestureOwner 会立刻返回 FIVE_FINGER 并放弃本次手势
-        arbiter.claimFiveFinger()
-        gate()?.observeGather(fingerCount = gathered.pressedCount, claimed = true)
-        PocketGestureLog.decision(
-            "凑满 ${gathered.pressedCount} 指 → 接管手势，" +
-                "横滑阈值 ${"%.0f".format(swipeThresholdPx)}px",
-        )
-
-        val initialPoints = gathered.event.changes.filter { it.pressed }.toFingerPoints()
-        val initial = fiveFingerGeometry(initialPoints)
-        if (initial == null) {
-            // 理论上不会发生（上面已确认 ≥5 指），防御性处理
-            PocketGestureLog.warn("凑满 ${gathered.pressedCount} 指却算不出几何，放弃本轮")
-            awaitAllPointersUp()
-            arbiter.reset()
-            gate()?.reset()
-            return@awaitEachGesture
-        }
-
-        PocketGestureLog.trace(
-            "初始几何 质心(${"%.0f".format(initial.centroidX)}, " +
-                "${"%.0f".format(initial.centroidY)}) 平均间距 ${"%.0f".format(initial.meanSpacing)}px",
-        )
-
-        trackAndFireFiveFingerGesture(initial, swipeThresholdPx, handler)
-
-        awaitAllPointersUp()
-        arbiter.reset()
-        gate()?.reset()
     }
 }
 
@@ -606,8 +678,27 @@ private fun PointerInputChange.toGatherFinger(): GatherFinger = GatherFinger(
 private fun fingerTravel(to: Offset, from: Offset): Float =
     kotlin.math.hypot((to.x - from.x).toDouble(), (to.y - from.y).toDouble()).toFloat()
 
-/** 等待所有手指抬起（`awaitEachGesture` 尾部也会做，这里显式写出来以便复位仲裁器）。 */
+/**
+ * 等待所有手指抬起（`awaitEachGesture` 尾部也会做，这里显式写出来以便复位仲裁器）。
+ *
+ * ## 必须先查当前事件（问题 3a / 2 的根因，真机实测）
+ *
+ * 修复前这里是「无条件等下一个事件」：当**同一个事件**里所有指针都已抬起（同帧抬指、
+ * 或 Compose 对系统 `ACTION_CANCEL` 合成的全抬起事件——见框架
+ * `SuspendingPointerInputFilter.onCancelPointerInput`）时，本函数不会返回，而是挂到
+ * **下一次触摸结束**才继续执行后面的复位。后果就是两个真机症状：
+ *
+ * - `FiveFingerGate` 的 `pendingFingers ≥ 3 / claimed` 陈旧覆盖下一次触摸 →
+ *   输入区 `clickable` 门控拦截点击、`LaunchedEffect` 压制自动弹出（症状 3a）；
+ * - 五指层卡在上一轮收尾、不跑下一轮凑指 → 不会 `releaseToTrackpad()` → 触控板层
+ *   每次都熬满 1500ms 安全超时（症状 2：连续手势交替失灵）。
+ *
+ * 框架自带的 `androidx.compose.foundation.gestures.awaitAllPointersUp` 语义正是
+ * 「先查 `currentEvent` 已全抬起则立即返回，否则再等」——此处与它对齐
+ * （回归测试见 `PocketGestureSequenceResetTest`）。
+ */
 private suspend fun AwaitPointerEventScope.awaitAllPointersUp() {
+    if (currentEvent.changes.none { it.pressed }) return
     while (true) {
         val event = awaitPointerEvent(PointerEventPass.Initial)
         if (event.changes.none { it.pressed }) return

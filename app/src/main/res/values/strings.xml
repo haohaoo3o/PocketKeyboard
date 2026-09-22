@@ -26,8 +26,16 @@
     <string name="pairing_discoverable_status_on">可被发现：剩余 %1$d 秒</string>
     <string name="pairing_discoverable_status_off">可被发现：未开启</string>
     <string name="pairing_pin_label">配对码</string>
-    <string name="pairing_pin_hint">在被控设备的蓝牙菜单里选择本设备，然后输入这 6 位配对码。</string>
+    <string name="pairing_pin_hint">在被控设备的蓝牙菜单里选择本设备；若要求输入配对码，输入这 4 位数字。</string>
     <string name="pairing_pin_placeholder">······</string>
+    <!-- 配对进行中的按变体提示（配对接管：屏幕上的数字 = 实际配对用的数字） -->
+    <string name="pairing_pin_hint_app_pin">配对进行中：若系统弹出配对框，请输入这组配对码后确认。</string>
+    <string name="pairing_pin_hint_shared_key">配对进行中：与系统配对框或被控设备上的数字核对一致后确认。</string>
+    <string name="pairing_pin_hint_entry_key">配对进行中：在被控设备上输入这组数字。</string>
+    <string name="pairing_pin_hint_remote_input">配对进行中：输入被控设备上显示的数字后提交。</string>
+    <string name="pairing_pin_hint_auto_confirmed">配对请求已自动确认，无需操作。</string>
+    <string name="pairing_pin_input_placeholder">输入对端显示的数字</string>
+    <string name="pairing_pin_submit">提交</string>
     <string name="pairing_devices_title">已配对设备</string>
     <string name="pairing_devices_empty">暂无已配对设备</string>
     <string name="pairing_devices_empty_unconfirmed">设备确认平台类型后会显示在这里</string>
@@ -39,6 +47,19 @@
     <!-- 主动连接的行内状态流转（Bug A2：点击设备行 → 连接中… → 已连接 / 连接失败） -->
     <string name="pairing_device_connecting">连接中…</string>
     <string name="pairing_device_connect_failed">连接失败</string>
+    <!-- 行内显式连接 / 断开按钮（被控设备连接管理由 App 控制） -->
+    <string name="pairing_device_action_connect">连接</string>
+    <string name="pairing_device_action_disconnect">断开</string>
+    <!-- 添加被控设备：App 内扫描 + 发起配对（createBond） -->
+    <string name="pairing_add_device">添加被控设备</string>
+    <string name="pairing_scan_title">扫描被控设备</string>
+    <string name="pairing_scan_hint">确认被控设备已开启蓝牙，然后在列表中选择它发起配对。</string>
+    <string name="pairing_scan_scanning">正在扫描附近的设备…</string>
+    <string name="pairing_scan_empty_finished">未发现可用设备，确认对端蓝牙已开启后重试。</string>
+    <string name="pairing_scan_failed">无法开始扫描，请授予蓝牙与定位权限后重试。</string>
+    <string name="pairing_scan_rescan">重新扫描</string>
+    <string name="pairing_scan_cancel">取消</string>
+    <string name="pairing_scan_pairing">正在发起配对…</string>
     <string name="pairing_device_platform_apple">苹果设备</string>
     <string name="pairing_device_platform_other">其他设备</string>
     <string name="pairing_device_active">当前控制目标</string>
@@ -261,7 +282,7 @@
     <string name="hid_unavailable_bluetooth_off">蓝牙尚未开启，请打开系统蓝牙后重试。</string>
     <string name="hid_unavailable_android_too_old">当前系统版本过低（需 Android 9 及以上），无法使用 HID 外设功能。</string>
     <string name="hid_unavailable_profile">系统未提供蓝牙 HID 外设能力（部分定制系统会禁用该功能），暂时无法连接。</string>
-    <string name="hid_unavailable_registration">HID 外设注册失败，可能有其他应用占用了该能力，请关闭后重试。</string>
+    <string name="hid_unavailable_registration">蓝牙 HID 外设注册失败：请开关一次蓝牙，或重启手机后重试；若仍失败，可能有其他应用占用了该能力。</string>
     <string name="hid_unavailable_permission">尚未获得蓝牙权限，请授予「附近的设备」权限后重试。</string>
 
     <!-- 配对流程提示 -->

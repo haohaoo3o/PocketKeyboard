@@ -159,11 +159,14 @@ class BroadcastBondRemovalConfirmer(private val context: Context) : BondRemovalC
             }
         }
         val registered = runCatching {
+            // 必须 RECEIVER_EXPORTED：bond 广播来自蓝牙进程（uid=1002），
+            // NOT_EXPORTED 会被 BroadcastQueue 拒投（真机日志实证 Exported Denial），
+            // 只能靠轮询兜底；导出注册后广播通道才真正生效（受保护系统广播，安全）。
             ContextCompat.registerReceiver(
                 context,
                 listening,
                 IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
-                ContextCompat.RECEIVER_NOT_EXPORTED,
+                ContextCompat.RECEIVER_EXPORTED,
             )
         }.onFailure { Log.w(TAG, "register bond receiver failed for $address", it) }.isSuccess
         if (registered) {

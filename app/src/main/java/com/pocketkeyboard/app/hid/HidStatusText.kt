@@ -24,6 +24,7 @@ object HidStatusText {
     fun pairingHint(variant: HidPairingVariant): Int = when (variant) {
         HidPairingVariant.PIN,
         HidPairingVariant.PASSKEY_ENTRY,
+        HidPairingVariant.DISPLAY,
         HidPairingVariant.OOB,
         -> R.string.hid_pairing_step_3
         HidPairingVariant.PASSKEY_CONFIRMATION,

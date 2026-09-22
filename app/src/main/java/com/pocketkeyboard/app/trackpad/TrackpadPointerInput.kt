@@ -15,6 +15,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.pocketkeyboard.app.gesture.GestureArbiter
+import com.pocketkeyboard.app.gesture.GestureConstants
 import com.pocketkeyboard.app.gesture.GestureOwner
 import com.pocketkeyboard.app.gesture.awaitGestureOwner
 import com.pocketkeyboard.app.hid.MouseButton
@@ -246,10 +247,16 @@ private suspend fun PointerInputScope.detectTrackpadGestures(
         val firstDown = awaitTrackpadDown(zones)
 
         // 兜底复位：把上一轮可能遗留的归属清成「未裁定」，避免新一轮手势被旧结果直接带走。
-        // 正常流程里五指挥势层已经在「所有手指抬起」后 reset 过，这里是双保险；
-        // 它只可能覆盖「陈旧的 TRACKPAD / FIVE_FINGER」，不可能覆盖本轮刚刚发生的裁定
-        // （本轮裁定至少要等第 5 根手指落下，而那一定晚于这里看到的第 1 根手指）。
-        arbiter.onGestureStart()
+        // 正常流程里五指挥势层已经在「所有手指抬起」后复位，这里是双保险。
+        //
+        // 例外：首帧事件**批量**落下 ≥5 指（合成注入 / 掌心同帧触地）时，五指层已在本
+        // 事件的 Initial pass 里 claimFiveFinger——而 Initial 先于本层的 Main，若此刻照旧
+        // 清归属，就会把刚刚做出的 FIVE_FINGER 裁决抹回 UNDECIDED，两边同时动手打架。
+        // 这种帧上跳过清零，awaitGestureOwner 直接读到 FIVE_FINGER 并放弃本轮手势。
+        val firstFramePressed = firstDown.event.changes.count { it.pressed }
+        if (firstFramePressed < GestureConstants.REQUIRED_FINGER_COUNT) {
+            arbiter.onGestureStart()
+        }
 
         // ② 仲裁：在五指层表态之前不消费、不动作。
         // 事件驱动：五指层一放手这里就返回，不再有固定 60ms 超时；等待期间读到的事件

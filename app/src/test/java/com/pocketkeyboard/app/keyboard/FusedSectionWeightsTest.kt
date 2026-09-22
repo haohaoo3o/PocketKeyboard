@@ -74,4 +74,47 @@ class FusedSectionWeightsTest {
             1e-4f,
         )
     }
+
+    // -------------------------------------- IME 可见时的三段紧贴布局（问题 3b）
+
+    @Test
+    fun `IME 可见时输入区权重收成零不再制造空隙`() {
+        // 真机症状：IME 弹出后「触控板下边缘没有贴着系统键盘」——四段结构里
+        // 输入区夹在触控板与修饰键排之间造成空隙。契约：IME 可见时它必须消失
+        assertEquals(0f, fusedKeyboardAreaWeight(keyboardMode = true, imeVisible = true))
+        assertEquals(0f, fusedKeyboardAreaWeight(keyboardMode = false, imeVisible = true))
+    }
+
+    @Test
+    fun `IME 可见时触控板吃满全部弹性高度`() {
+        assertEquals(1f, fusedTrackpadWeight(keyboardMode = true, imeVisible = true))
+        assertEquals(1f, fusedTrackpadWeight(keyboardMode = false, imeVisible = true))
+    }
+
+    @Test
+    fun `IME 可见时两个权重之和仍为一`() {
+        for (keyboardMode in listOf(true, false)) {
+            assertEquals(
+                1f,
+                fusedTrackpadWeight(keyboardMode, imeVisible = true) +
+                    fusedKeyboardAreaWeight(keyboardMode, imeVisible = true),
+                1e-4f,
+            )
+        }
+    }
+
+    @Test
+    fun `IME 隐藏时权重与不传 imeVisible 的旧行为完全一致`() {
+        // 默认参数 imeVisible = false 必须退回 B4 的 mode 权重（点按热区不受影响）
+        for (keyboardMode in listOf(true, false)) {
+            assertEquals(
+                fusedTrackpadWeight(keyboardMode),
+                fusedTrackpadWeight(keyboardMode, imeVisible = false),
+            )
+            assertEquals(
+                fusedKeyboardAreaWeight(keyboardMode),
+                fusedKeyboardAreaWeight(keyboardMode, imeVisible = false),
+            )
+        }
+    }
 }

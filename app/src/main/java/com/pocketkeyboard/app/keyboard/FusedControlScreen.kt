@@ -7,11 +7,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -132,11 +134,19 @@ import kotlin.math.roundToInt
  * 输入内容经 InputConnection 落到文本框后，由 [ImeTextDiff] 差分出「追加 / 删除」，
  * 再逐字符经 `HidUsageMapper` 映射成 HID usage 发给被控设备（输入框随即清空）。
  *
- * ## 输入法弹出时的避让
+ * ## 输入法弹出时的避让与三段布局（问题 3b）
  *
  * 页面根部挂 `Modifier.imePadding()`（`WindowInsets.ime`，API 30+ 跟随输入法
  * 显示 / 隐藏动画同步插值）：输入法弹出时整页内容被顶到输入法上方，触控板
  * **不会被输入法盖掉**；输入法收起后触控板恢复完整高度。
+ *
+ * IME 可见时布局必须是**三段紧贴**：触控板（`weight` 弹性占满上部）→ 修饰键排
+ * （固定 64dp，底边紧贴 IME 顶缘）→ 系统键盘。为此输入区（四段结构里曾经夹在
+ * 触控板与修饰键排之间的那一段）在 `imeVisible` 时改成 `height(0.dp)` 整段收起
+ * （**不能**用 `weight(0f)`——Compose 断言 weight 必须 > 0，真机实测直接崩溃）：
+ * 它不再制造「触控板下边缘没贴着系统键盘」的空隙，修饰键排也绝不被 IME 遮挡；
+ * 收放全程的平滑度由根部 imePadding 对 `WindowInsets.ime` 动画的逐帧插值提供。
+ * IME 隐藏时输入区恢复按 mode 取的权重（点按热区保持足够大）。
  *
  * ## 与其它模块的关系
  *
@@ -170,6 +180,31 @@ fun FusedControlScreen(
     // 因此「张开看到键盘、收缩看到触控板」在竖屏同样成立（真机实测原两种 mode 视觉
     // 完全相同，用户完全看不出模式切没切）。
     val keyboardMode = mode == AppMode.KEYBOARD || mode == AppMode.NUMPAD
+
+    // IME 归属权（真机实测：五指张开 → 键盘模式后系统键盘时弹时不弹的竞态根因）：
+    // AnimatedContent 切 mode（TRACKPAD ↔ KEYBOARD）时会短暂同时存在**两个**
+    // FusedControlScreen 实例——退场实例与入场实例的 LaunchedEffect 都订阅同一个
+    // 闸门状态，闸门复位那一刻两边同时醒来：入场的要 show()、退场的要 hide()
+    // （或退场实例随转场结束被 dispose 时其 onDispose 收起输入法），谁后执行谁赢，
+    // 真机 3 次实测 2 次被 hide 抢赢 → 自动弹出偶发失效。
+    // 规则：**只有当前 mode 与 ViewModel 一致的实例（未在退场）才允许碰 IME**；
+    // 退场实例整条联动链（含 onDispose）静默退出，show/hide 由此单一化。
+    val currentMode by viewModel.mode.collectAsStateWithLifecycle()
+    val isActivePage = mode == currentMode
+
+    // ---------------------------------------------------------------- IME 可见性（问题 3b）
+    //
+    // 竖屏融合页的四段布局：触控板 / 输入区 / 修饰键排 / IME。IME 收起时输入区正常
+    // 展示（点按热区）；IME 可见时输入区**整段收起**（height(0)，见 Column 内的
+    // 条件 modifier），把 Column 的全部弹性高度让给触控板，修饰键排的底边由根部
+    // imePadding 紧贴 IME 顶缘——三段（触控板 → 修饰键排 → 系统键盘）紧贴、
+    // 无缝隙、互不遮挡。
+    //
+    // WindowInsets.ime 的底部值在 IME 显示 / 隐藏动画期间逐帧变化（API 30+ Compose
+    // 跟随 WindowInsetsAnimation 插值），在组合期读取即订阅该快照状态，收放全程都能
+    // 拿到当前可见性；imePadding（根部 modifier 链）负责同步的避让动画，两者同源。
+    val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
+    val imeVisible = imeBottomPx > 0
 
     val context = LocalContext.current
     val view = LocalView.current
@@ -319,16 +354,35 @@ fun FusedControlScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     // B4：触控板区 / 键盘区的权重随 mode 变化——键盘模式键盘区更大
-                    // （配合弹出的系统输入法），触控板模式触控板区更大（键盘区缩成一条）
-                    .weight(fusedTrackpadWeight(keyboardMode)),
+                    // （配合弹出的系统输入法），触控板模式触控板区更大（键盘区缩成一条）。
+                    // IME 可见时权重为 1，而此时输入区是 height(0)（不参与 weight），
+                    // 触控板成为唯一弹性子项 → 自动占满修饰键排以上的全部空间（问题 3b）
+                    .weight(fusedTrackpadWeight(keyboardMode, imeVisible)),
             )
             FusedImeInputArea(
                 onCommitChar = ::onImeCommit,
                 onBackspace = ::onImeBackspace,
                 keyboardMode = keyboardMode,
+                isActivePage = isActivePage,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(fusedKeyboardAreaWeight(keyboardMode)),
+                    .then(
+                        if (imeVisible) {
+                            // 问题 3b：IME 可见 → 输入区整段收起，修饰键排直接贴 IME 顶缘。
+                            // 收起走固定 height(0) 而不是 weight(0)——Compose 的
+                            // `Modifier.weight` 断言 weight > 0（真机实测 weight(0f) 直接
+                            // IllegalArgumentException 崩溃）。此刻触控板是唯一带 weight
+                            // 的子项，无论其权重值多少都会分走全部剩余高度，因此收起后
+                            // 布局就是「触控板 → 修饰键排 → IME」三段紧贴；收放的观感
+                            // 平滑度由根部 imePadding 对 WindowInsets.ime 动画的逐帧
+                            // 插值提供（任何一帧修饰键排底边都贴着 IME 当前顶缘，
+                            // 不可能出现空隙或遮挡）
+                            Modifier.height(0.dp)
+                        } else {
+                            // IME 隐藏：恢复按 mode 取的权重，点按热区保持足够大
+                            Modifier.weight(fusedKeyboardAreaWeight(keyboardMode))
+                        },
+                    ),
             )
             FusedModifierRow(
                 platform = platform,
@@ -367,24 +421,36 @@ internal object FusedMetrics {
 }
 
 /**
- * 触控板区在竖屏融合页 Column 里的权重（B4）。
+ * 触控板区在竖屏融合页 Column 里的权重（B4 + 问题 3b）。
  *
  * 键盘模式（[keyboardMode] = true，五指张开 / KEYBOARD / NUMPAD）：键盘区（系统输入法唤起区）
  * 拿到主要高度，触控板区相应缩小——用户要做的是「打字」而不是「指向」，屏幕下半还有
  * 弹出的系统输入法。触控板模式则反过来：触控板区拿到绝大部分高度，键盘区缩成一条
  * （仅留修饰键排）。
+ *
+ * @param imeVisible 系统输入法当前可见：可见时触控板区吃满全部弹性高度（= 1），
+ *   输入区收起为 0——IME 可见时的布局契约为「触控板 → 修饰键排 → 系统键盘」三段
+ *   紧贴，输入区不制造空隙（问题 3b，单测覆盖）。
  */
-internal fun fusedTrackpadWeight(keyboardMode: Boolean): Float = when (keyboardMode) {
-    // 0.55 + 0.45 = 1：两个 weight 之和，余下高度全给固定高度的修饰键排
-    true -> FusedLayout.WEIGHT_TRACKPAD_KEYBOARD_MODE
-    false -> FusedLayout.WEIGHT_TRACKPAD_TRACKPAD_MODE
-}
+internal fun fusedTrackpadWeight(keyboardMode: Boolean, imeVisible: Boolean = false): Float =
+    when {
+        imeVisible -> 1f
+        // 0.55 + 0.45 = 1：两个 weight 之和，余下高度全给固定高度的修饰键排
+        keyboardMode -> FusedLayout.WEIGHT_TRACKPAD_KEYBOARD_MODE
+        else -> FusedLayout.WEIGHT_TRACKPAD_TRACKPAD_MODE
+    }
 
-/** 键盘区（系统输入法唤起区）的权重，见 [fusedTrackpadWeight]。 */
-internal fun fusedKeyboardAreaWeight(keyboardMode: Boolean): Float = when (keyboardMode) {
-    true -> FusedLayout.WEIGHT_KEYBOARD_AREA_KEYBOARD_MODE
-    false -> FusedLayout.WEIGHT_KEYBOARD_AREA_TRACKPAD_MODE
-}
+/**
+ * 键盘区（系统输入法唤起区）的权重，见 [fusedTrackpadWeight]。
+ *
+ * IME 可见时恒为 0（问题 3b）；IME 隐藏时按 mode 取值，保证点按热区足够大。
+ */
+internal fun fusedKeyboardAreaWeight(keyboardMode: Boolean, imeVisible: Boolean = false): Float =
+    when {
+        imeVisible -> 0f
+        keyboardMode -> FusedLayout.WEIGHT_KEYBOARD_AREA_KEYBOARD_MODE
+        else -> FusedLayout.WEIGHT_KEYBOARD_AREA_TRACKPAD_MODE
+    }
 
 /**
  * 竖屏融合页两个 mode 的布局权重（B4，单测覆盖）。
@@ -591,6 +657,7 @@ private fun FusedImeInputArea(
     onCommitChar: (Char) -> Unit,
     onBackspace: (Int) -> Unit,
     keyboardMode: Boolean,
+    isActivePage: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val focusManager = LocalFocusManager.current
@@ -601,7 +668,12 @@ private fun FusedImeInputArea(
     // 五指挥意图闸门：出现五指意图就收起系统输入法，把屏幕让给手势层
     val fiveFingerGate = LocalFiveFingerGate.current
     val yieldToFiveFinger = fiveFingerGate.shouldYieldToFiveFinger
-    LaunchedEffect(yieldToFiveFinger, keyboardMode) {
+    LaunchedEffect(yieldToFiveFinger, keyboardMode, isActivePage) {
+        // 退场中的实例（mode 已切走，见 FusedControlScreen 里 isActivePage 的说明）：
+        // IME 的归属权已交给入场页，本实例的 show / hide 一律不执行——否则闸门复位
+        // 触发的重启会让退场页的 hide() 与入场页的 show() 竞态，真机上自动弹出
+        // 偶发被抢灭（五指张开 → 键盘模式后键盘弹不出来的根因之一）。
+        if (!isActivePage) return@LaunchedEffect
         when {
             // ① 意图确立先收：5 指手势期间绝不让输入法占着屏幕下半（否则手指到不了手势层）
             yieldToFiveFinger -> {
@@ -739,13 +811,11 @@ private fun FusedImeInputArea(
         }
     }
 
-    // 离开页面时收起系统输入法并清除焦点，避免输入法盖住下一个页面
-    DisposableEffect(Unit) {
-        onDispose {
-            focusManager.clearFocus()
-            keyboardController?.hide()
-        }
-    }
+    // 离开**整个融合页**时的输入法收起不再放在 onDispose：AnimatedContent 切 mode 时
+    // 退场实例的 dispose 与入场实例的自动弹出会竞态（真机 3 次 2 次被 dispose 的
+    // hide 抢赢）。页面级退出（去配对页 / 转横屏）的收起统一由 MainActivity 根部的
+    // LaunchedEffect(mode, landscape) 负责；mode 间切换由上面 isActivePage 守卫的
+    // LaunchedEffect 负责——两个 owner 各管一段，不存在并发写。
 }
 
 /** 零宽空格哨兵：输入框里恒定保留的不可见字符（退格捕获，见 [FusedImeInputArea] 说明）。 */

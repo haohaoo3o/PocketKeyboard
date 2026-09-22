@@ -3,6 +3,8 @@ package com.pocketkeyboard.app.hid
 import com.pocketkeyboard.app.ui.DevicePlatform
 import com.pocketkeyboard.app.ui.MainViewModel
 import com.pocketkeyboard.app.ui.PairedDevice
+import com.pocketkeyboard.app.ui.PairingDisplay
+import com.pocketkeyboard.app.ui.PairingDisplayKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -20,40 +22,31 @@ class MainViewModelStatusBridgeTest {
     private val bridge = MainViewModelStatusBridge(viewModel)
 
     @Test
-    fun `app pin wins for passkey entry variants`() {
-        viewModel.setPinCode("123456")
-
-        bridge.onPairingRequest(
-            "AA:BB:CC:DD:EE:01",
-            HidPairingVariant.PASSKEY_ENTRY,
-            pinOrPasskey = null,
-        )
-
-        assertEquals("123456", viewModel.pinCode.value)
-    }
-
-    @Test
-    fun `app pin wins for pin variants even when broadcast carries a key`() {
-        viewModel.setPinCode("123456")
-
+    fun `pin variant shows the fixed app pin`() {
         bridge.onPairingRequest("AA:BB:CC:DD:EE:01", HidPairingVariant.PIN, pinOrPasskey = 999999)
 
-        assertEquals("123456", viewModel.pinCode.value)
+        // 屏幕上的数字 = 实际配对用的数字：PIN 输入类永远是固定配对码 0000
+        assertEquals(APP_PAIRING_PIN, viewModel.pinCode.value)
+        assertEquals(
+            PairingDisplay("AA:BB:CC:DD:EE:01", PairingDisplayKind.SHOW_APP_PIN),
+            viewModel.pairingDisplay.value,
+        )
     }
 
     @Test
-    fun `system key is fallback when app has no pin`() {
-        viewModel.setPinCode(null)
+    fun `passkey entry asks the user for the remote key`() {
+        bridge.onPairingRequest("AA:BB:CC:DD:EE:01", HidPairingVariant.PASSKEY_ENTRY, pinOrPasskey = null)
 
-        bridge.onPairingRequest("AA:BB:CC:DD:EE:01", HidPairingVariant.PASSKEY_ENTRY, 246810)
-
-        assertEquals("246810", viewModel.pinCode.value)
+        // 对端展示的数字必须由用户转述：展示输入指令而不是猜一个码
+        assertNull(viewModel.pinCode.value)
+        assertEquals(
+            PairingDisplay("AA:BB:CC:DD:EE:01", PairingDisplayKind.NEED_REMOTE_KEY_INPUT),
+            viewModel.pairingDisplay.value,
+        )
     }
 
     @Test
-    fun `confirmation variants show the system key`() {
-        viewModel.setPinCode("123456")
-
+    fun `confirmation variants show the live system key`() {
         bridge.onPairingRequest(
             "AA:BB:CC:DD:EE:01",
             HidPairingVariant.PASSKEY_CONFIRMATION,
@@ -61,22 +54,79 @@ class MainViewModelStatusBridgeTest {
         )
 
         assertEquals("246810", viewModel.pinCode.value)
+        assertEquals(
+            PairingDisplay("AA:BB:CC:DD:EE:01", PairingDisplayKind.SHOW_SHARED_KEY),
+            viewModel.pairingDisplay.value,
+        )
     }
 
     @Test
-    fun `just works without key clears the pin`() {
-        viewModel.setPinCode("123456")
+    fun `display variant shows the live system key as entry key`() {
+        bridge.onPairingRequest("AA:BB:CC:DD:EE:01", HidPairingVariant.DISPLAY, 123456)
 
+        assertEquals("123456", viewModel.pinCode.value)
+        assertEquals(
+            PairingDisplay("AA:BB:CC:DD:EE:01", PairingDisplayKind.SHOW_ENTRY_KEY),
+            viewModel.pairingDisplay.value,
+        )
+    }
+
+    @Test
+    fun `just works shows auto confirmed without digits`() {
         bridge.onPairingRequest("AA:BB:CC:DD:EE:01", HidPairingVariant.CONSENT, null)
 
         assertNull(viewModel.pinCode.value)
+        assertEquals(
+            PairingDisplay("AA:BB:CC:DD:EE:01", PairingDisplayKind.AUTO_CONFIRMED),
+            viewModel.pairingDisplay.value,
+        )
     }
 
     @Test
-    fun `bridge exposes the app pin to the pairing responder`() {
-        viewModel.setPinCode("424242")
+    fun `bond completion resets the pin block to idle`() {
+        bridge.onPairingRequest("AA:BB:CC:DD:EE:01", HidPairingVariant.PASSKEY_CONFIRMATION, 246810)
 
-        assertEquals("424242", bridge.pairingPinCode)
+        bridge.onBondStateChanged("AA:BB:CC:DD:EE:01", HidBondState.BONDED)
+
+        // 回到空闲态：配对页展示固定配对码 0000（pinCode=null 时的 UI 兜底）
+        assertNull(viewModel.pinCode.value)
+        assertNull(viewModel.pairingDisplay.value)
+    }
+
+    @Test
+    fun `auto answer success switches the hint to auto confirmed`() {
+        bridge.onPairingRequest("AA:BB:CC:DD:EE:01", HidPairingVariant.PASSKEY_CONFIRMATION, 246810)
+
+        bridge.onPairingAutoAnswered("AA:BB:CC:DD:EE:01", PairingAnswer.CONFIRMED)
+
+        assertEquals(
+            PairingDisplay("AA:BB:CC:DD:EE:01", PairingDisplayKind.AUTO_CONFIRMED),
+            viewModel.pairingDisplay.value,
+        )
+    }
+
+    @Test
+    fun `auto answer failure keeps the manual confirm hint instead of lying`() {
+        bridge.onPairingRequest("AA:BB:CC:DD:EE:01", HidPairingVariant.PASSKEY_CONFIRMATION, 246810)
+
+        // 平台封锁（BLUETOOTH_PRIVILEGED）时应答会失败：不能谎称「已自动确认」
+        bridge.onPairingAutoAnswered("AA:BB:CC:DD:EE:01", PairingAnswer.FAILED)
+
+        assertEquals(
+            PairingDisplay("AA:BB:CC:DD:EE:01", PairingDisplayKind.SHOW_SHARED_KEY),
+            viewModel.pairingDisplay.value,
+        )
+    }
+
+    @Test
+    fun `host connected clears the connecting and failed flags for that host`() {
+        viewModel.setConnectingDeviceAddress(ADDRESS)
+        viewModel.setConnectFailedAddress(ADDRESS)
+
+        bridge.onHostConnected(HidDeviceInfo(ADDRESS, "iPad", DevicePlatformHint.APPLE))
+
+        assertNull(viewModel.connectingDeviceAddress.value)
+        assertNull(viewModel.connectFailedAddress.value)
     }
 
     @Test

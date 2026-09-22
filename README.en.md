@@ -12,14 +12,17 @@ Pair it with an iPad / iPhone / Mac / Windows device and use your phone as their
 | --- | --- |
 | ![Pairing](docs/screenshots/01_pairing.png) | ![Keyboard](docs/screenshots/02_keyboard.png) |
 
-| Trackpad (landscape fullscreen) | Numeric Keypad |
+| Fused page + system IME | Numeric Keypad |
 | --- | --- |
-| ![Trackpad](docs/screenshots/03_trackpad.png) | ![Keypad](docs/screenshots/04_numpad.png) |
+| ![System IME](docs/screenshots/03_trackpad.png) | ![Keypad](docs/screenshots/04_numpad.png) |
 
 ## Features
 
 - **Bluetooth HID peripheral**: registers a composite keyboard + trackpad device via the system `BluetoothHidDevice` profile (standard HID report descriptors), so hosts recognize the phone as a Bluetooth keyboard/trackpad
-- **Pairing screen**: shows the local Bluetooth name and pairing code, supports pairing with multiple hosts simultaneously; on first connection to a host you choose "Apple device / Other device" to adapt layout and gestures (choice is persisted)
+- **Broadcast name distinct from the phone**: on launch the app renames the local Bluetooth device to `PocketKeyboard-<brand>` (e.g. `PocketKeyboard-redmi`) so hosts can tell this is PocketKeyboard, not the phone itself
+- **Pairing screen**: shows the fixed pairing code `0000` and, while pairing, the **actual live SSP number** (identical to what the host displays — see "Pairing code" below); supports pairing with multiple hosts simultaneously; on first connection to a host you choose "Apple device / Other device" to adapt layout and gestures (choice is persisted)
+- **Add controlled devices**: scan nearby Bluetooth devices and start pairing right from the app (`createBond`); adding / connecting / disconnecting / deleting hosts is fully app-driven (swipe-left to delete); the in-app "Connect / Disconnect" button manages connections (disconnect is sticky — host auto-reconnect won't override it)
+- **Connection reliability**: every connect attempt has a 9-second watchdog (lost callbacks / unresponsive hosts are failed and retried with backoff — "Connecting…" never hangs forever) plus a 3-second system-truth reconciliation; wedged HID registration (some ROMs wedge it after a force-kill) self-heals automatically (rooted devices restart the Bluetooth stack)
 - **CONTROL button**: grey and disabled until a host is connected, then turns black and enters the control UI
 - **Five-finger gestures** (global, with animated feedback and text hints):
   - Pinch in → switch to trackpad mode
@@ -59,19 +62,29 @@ Or simply open the project directory in Android Studio.
 ### Tests
 
 ```bash
-./gradlew testDebugUnitTest   # 159 unit tests (incl. Robolectric Compose UI smoke tests)
+./gradlew testDebugUnitTest   # 394 unit tests (incl. Robolectric Compose UI smoke tests)
 ./gradlew lintDebug           # static analysis
 ```
 
 ## Usage
 
 1. Install and open the app, grant the Bluetooth permissions when asked
-2. Tap "Discoverable" (top-right) on the pairing screen, then **select this phone in the Bluetooth menu of the host device** (iPad / Mac / Windows, etc.)
-3. Complete the system pairing flow (some hosts require confirmation on both sides); the CONTROL button turns black once connected
+2. Add a controlled device (either way):
+   - tap "Add controlled device" in the app and pick the host from the scan list — the app starts pairing directly; or
+   - tap "Discoverable" (top-right), then **select this phone in the Bluetooth menu of the host device** (iPad / Mac / Windows, etc.)
+3. Complete pairing (see "Pairing code" below); the device row shows "Connected" once done
 4. On first connection the app asks whether the host is an Apple device or another device, and adapts the keyboard layout and trackpad gestures accordingly
 5. Tap CONTROL to enter the control UI; five-finger gestures switch modes / hosts at any time
 
-> Note: the current implementation uses the classic Bluetooth HID profile, where pairing follows the system SSP numeric-comparison flow; the 6-digit code shown on the pairing screen supports hosts that use passkey entry.
+### Pairing code
+
+The digits shown on the pairing screen are the **exact digits used for pairing**:
+
+- **Fixed pairing code `0000`** (idle): enter it when the host asks for a PIN / pairing code;
+- **While pairing**: the screen shows the **actual live SSP number** — identical to the one on the host's screen;
+- when a confirmation click is required (numeric comparison / just works), tap "Pair" in the system confirmation dialog.
+
+> Platform limitation: Android hides `setPairingConfirmation` / `setPin` behind `BLUETOOTH_PRIVILEGED` (signature|privileged), so a normal app cannot complete the final confirmation programmatically — the system dialog carries that last click. The **number itself is always sourced from the app** and matches the host exactly.
 
 ## Project Structure
 
@@ -83,7 +96,7 @@ app/src/main/java/com/pocketkeyboard/app/
 ├── keyboard/                # 87-key / 26-key layout models, seamless keycaps, fn combos, portrait fused screen, HID report engine
 ├── trackpad/                # Trackpad gestures, Win/Apple gesture sets, numeric keypad sheet
 └── ui/                      # MainViewModel, pairing screen, theme
-app/src/test/                # 159 unit tests (layout/gesture/HID reports/Robolectric UI)
+app/src/test/                # 394 unit tests (layout/gesture/HID reports/Robolectric UI)
 ```
 
 See the in-code comments and the [cross-module contract](app/src/main/java/com/pocketkeyboard/app/hid/HidTransport.kt) for details.
@@ -92,10 +105,10 @@ See the in-code comments and the [cross-module contract](app/src/main/java/com/p
 
 | # | Limitation | Status |
 | --- | --- | --- |
-| 1 | **Unavailable-reason hints not wired to UI** | Reason strings exist (Bluetooth off / registration rejected, etc.) but are not shown yet |
+| 1 | **Final pairing confirmation needs the system dialog** | `setPairingConfirmation` / `setPin` require `BLUETOOTH_PRIVILEGED` (blocked for normal apps); the app shows the real SSP number, just tap "Pair" in the system dialog |
 | 2 | **Multi-host switching relies on known registry addresses** | Hosts never connected before are not auto-`connectHost`; select them once on the pairing screen |
 | 3 | **HID device registration uniqueness** | The system allows only one app to register the HID device at a time; if taken by another IME, registration retries when the app returns to the foreground |
-| 4 | **Pairing code is display-only** | The real SSP number comes from the system pairing dialog |
+| 4 | **Registration-wedge root assist** | Some ROMs (MIUI observed) wedge HID registration after a force-kill; non-rooted devices get a "toggle Bluetooth" prompt, rooted devices self-heal by restarting the Bluetooth stack |
 | 5 | **`AppMode.NUMPAD` does not switch pages** | The keypad is a bottom sheet inside the trackpad page |
 | 6 | **Test coverage boundary** | Unit tests cover the pure-logic layer; real Bluetooth connections, gesture feel, and haptic levels need on-device verification; no androidTest yet |
 

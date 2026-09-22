@@ -159,12 +159,31 @@ interface HidProfileGateway {
 
     /** 系统已配对（bonded）设备列表（`BluetoothAdapter.getBondedDevices`）。 */
     fun bondedHosts(): List<HidHost>
+
+    /**
+     * 设置本机蓝牙名称（`BluetoothAdapter.setName`）：被控设备在蓝牙菜单里看到的
+     * **广播名**。App 用它把设备名与手机系统名区分开（如 `PocketKeyboard-redmi`）。
+     *
+     * 默认实现返回 false（测试 / 无蓝牙硬件），生产实现在 [SystemHidProfileGateway]。
+     */
+    fun setLocalName(name: String): Boolean = false
 }
 
 /** bond / 配对 / 蓝牙开关事件源（`BroadcastReceiver` 的抽象）。 */
 interface BondEventSource {
     fun start(listener: BondEventListener)
     fun stop()
+}
+
+/**
+ * bond / 配对事件监听。
+ *
+ * [onBondEvent] 的返回值只对 [BondEvent.PairingRequest] 有意义：**true = App 已接管
+ * 本次配对请求**（已自动应答，或已在 App 内展示配对码/收集输入），事件源应当
+ * `abortBroadcast()` 抑制系统配对框；false = 未接管，交给系统配对对话框兜底。
+ */
+fun interface BondEventListener {
+    fun onBondEvent(event: BondEvent): Boolean
 }
 
 /** bond / 配对事件。 */
@@ -181,9 +200,4 @@ sealed interface BondEvent {
 
     /** 蓝牙适配器开关状态变化（true = 已开启）。 */
     data class AdapterStateChanged(val enabled: Boolean) : BondEvent
-}
-
-/** bond 事件监听。 */
-fun interface BondEventListener {
-    fun onBondEvent(event: BondEvent)
 }
