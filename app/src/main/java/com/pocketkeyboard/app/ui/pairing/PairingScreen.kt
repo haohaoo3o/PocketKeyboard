@@ -283,7 +283,7 @@ fun PairingScreen(
     // 并用 DataStore 中持久化的平台类型校正（不覆盖其他模块已写入的平台信息）。
     //
     // 回写策略：这里刻意回写全量合并结果、不按平台确认状态过滤。pairedDevices 是跨模块
-    // 契约——MainActivity 的五指横滑循环切设备、HID bridge 的 onPairedDevicesChanged
+    // 契约——HID bridge 的 onPairedDevicesChanged
     // 都会写它；若在这里按平台过滤回写，bridge 每次上报都会把设备重新写回来、本 Effect
     // 再过滤掉，形成来回覆盖；全部设备都未确认时合并结果还是空列表，写回去会把契约数据
     // 清空。分区只做在下方 DeviceSections 调用处的展示层，不动契约本身；
@@ -395,7 +395,7 @@ fun PairingScreen(
         Spacer(modifier = Modifier.height(14.dp))
 
         // 设备列表分区：已配对（平台已确认）/ 新发现（已 bond 未选平台）。
-        // pairedDevices 里保留全部 bonded 设备（契约要求 + 五指横滑循环要用），
+        // pairedDevices 里保留全部 bonded 设备（契约要求），
         // 「是否已确认平台」只作为分区依据，不再把设备藏起来。
         DeviceSections(
             confirmedDevices = pairedDevices.filter { platforms[it.address] != null },

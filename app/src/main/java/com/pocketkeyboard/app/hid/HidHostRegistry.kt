@@ -5,7 +5,7 @@ package com.pocketkeyboard.app.hid
  *
  * 职责：
  * - 维护「当前已连接的 HID 主机」集合与连接顺序（先连上的排在前面，UI 列表用）
- * - 维护「当前控制目标」activeDevice 及其循环切换（五指手势左右滑切设备用）
+ * - 维护「当前控制目标」activeDevice（配对页点击设备行切换）
  * - 记录每个主机的名称 / bond 状态 / HID 连接状态缓存
  * - 计算重连退避时长
  *
@@ -114,20 +114,6 @@ class HidHostRegistry {
         return true
     }
 
-    /**
-     * 在已连接主机之间循环切换控制目标（五指左右滑手势用）。
-     *
-     * @return 切换后的地址；只有 0 个或 1 个已连接主机时返回当前值。
-     */
-    fun cycleActive(): String? {
-        val connected = connectedAddresses()
-        if (connected.size <= 1) return activeAddress
-        val index = connected.indexOf(activeAddress)
-        val next = connected[(index + 1).mod(connected.size)]
-        activeAddress = next
-        return next
-    }
-
     /** 生成 UI 需要的设备信息。 */
     fun deviceInfo(address: String): HidDeviceInfo? {
         val entry = entries[address] ?: return null
@@ -165,6 +151,11 @@ class HidHostRegistry {
  *
  * HID 外设角色下，对端主机通常会在虚拟线缆断开后主动回连；本策略用于
  * 「我方也主动 connect()」的兜底路径，避免对端回连失败后再无补救。
+ *
+ * **不设放弃上限**（真机实证教训）：曾经的 MAX_ATTEMPTS 耗尽即「永久放弃、等用户
+ * 手动重连」，而 MIUI 的重复回调会把 attempt 灌水 2 倍速烧光预算——用户视角就是
+ * 「操作再也没反应」。现在退避只决定间隔（15s 封顶），只要设备还配对着就一直守护重连；
+ * 用户主动断开（粘性断开）由调用方拦截，不在此层。
  */
 object ReconnectPolicy {
 
@@ -174,18 +165,12 @@ object ReconnectPolicy {
     /** 退避上限。 */
     const val MAX_DELAY_MS = 15_000L
 
-    /** 最多连续重连次数（超过后放弃，等用户手动重连）。 */
-    const val MAX_ATTEMPTS = 12
-
-    /** attempt 从 1 开始计数：1s → 2s → 4s → … → 15s。 */
+    /** attempt 从 1 开始计数：1s → 2s → 4s → … → 15s 封顶，此后一直 15s。 */
     fun delayFor(attempt: Int): Long {
         if (attempt <= 0) return 0L
         val delay = FIRST_DELAY_MS shl (attempt - 1).coerceAtMost(6)
         return delay.coerceAtMost(MAX_DELAY_MS)
     }
-
-    /** 是否还应继续重连。 */
-    fun shouldRetry(attempt: Int): Boolean = attempt < MAX_ATTEMPTS
 }
 
 /** 重连调度器抽象（Android 侧用 Handler 实现，测试用 fake）。 */

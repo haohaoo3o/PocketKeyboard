@@ -1,21 +1,14 @@
 package com.pocketkeyboard.app.gesture
 
 import androidx.compose.animation.AnimatedContentTransitionScope
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.SpringSpec
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.spring
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.IntOffset
 import com.pocketkeyboard.app.ui.AppMode
 
@@ -72,46 +65,4 @@ fun applePageTransitionSpec(): AnimatedContentTransitionScope<AppMode>.() -> Con
         slideOutOfContainer(slide, AppleSpring.intOffset) +
             fadeOut(animationSpec = AppleSpring.float)
         )
-}
-
-/**
- * 覆盖式转场：内容从屏幕一侧整体滑入，盖住当前页面，离开时再滑出。
- *
- * 五指整体横滑切换设备时使用（见 `MainActivity` 的手势回调）。
- *
- * @param visible true 时覆盖层可见
- * @param enterFromRight true 从右侧覆盖进入（默认），false 从左侧
- * @param content 覆盖层内容
- */
-@Composable
-fun CoverTransition(
-    visible: Boolean,
-    modifier: Modifier = Modifier,
-    enterFromRight: Boolean = true,
-    content: @Composable () -> Unit,
-) {
-    val enter: EnterTransition =
-        if (enterFromRight) {
-            slideInHorizontally(AppleSpring.intOffset) { full -> full } +
-                fadeIn(animationSpec = AppleSpring.float)
-        } else {
-            slideInHorizontally(AppleSpring.intOffset) { full -> -full } +
-                fadeIn(animationSpec = AppleSpring.float)
-        }
-    val exit: ExitTransition =
-        if (enterFromRight) {
-            slideOutHorizontally(AppleSpring.intOffset) { full -> full } +
-                fadeOut(animationSpec = AppleSpring.float)
-        } else {
-            slideOutHorizontally(AppleSpring.intOffset) { full -> -full } +
-                fadeOut(animationSpec = AppleSpring.float)
-        }
-    AnimatedVisibility(
-        visible = visible,
-        modifier = modifier,
-        enter = enter,
-        exit = exit,
-    ) {
-        content()
-    }
 }

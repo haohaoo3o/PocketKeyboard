@@ -22,12 +22,11 @@ Pair it with an iPad / iPhone / Mac / Windows device and use your phone as their
 - **Broadcast name distinct from the phone**: on launch the app renames the local Bluetooth device to `PocketKeyboard-<brand>` (e.g. `PocketKeyboard-redmi`) so hosts can tell this is PocketKeyboard, not the phone itself
 - **Pairing screen**: shows the fixed pairing code `0000` and, while pairing, the **actual live SSP number** (identical to what the host displays — see "Pairing code" below); supports pairing with multiple hosts simultaneously; on first connection to a host you choose "Apple device / Other device" to adapt layout and gestures (choice is persisted)
 - **Add controlled devices**: scan nearby Bluetooth devices and start pairing right from the app (`createBond`); adding / connecting / disconnecting / deleting hosts is fully app-driven (swipe-left to delete); the in-app "Connect / Disconnect" button manages connections (disconnect is sticky — host auto-reconnect won't override it)
-- **Connection reliability**: every connect attempt has a 9-second watchdog (lost callbacks / unresponsive hosts are failed and retried with backoff — "Connecting…" never hangs forever) plus a 3-second system-truth reconciliation; wedged HID registration (some ROMs wedge it after a force-kill) self-heals automatically (rooted devices restart the Bluetooth stack)
+- **Connection reliability** (fully self-healing): every connect attempt has a 9-second watchdog (lost callbacks / unresponsive hosts are failed and retried with backoff — "Connecting…" never hangs forever) plus a 3-second system-truth reconciliation; duplicated disconnect callbacks are deduplicated (MIUI is known to dispatch the same callback twice); reconnects **never give up** (backoff caps at 15s and keeps guarding); send failures self-heal — "system says connected but reports won't send" re-registers the HID app (deterministic recovery after the system silently unregisters it while locked/backgrounded), dead links bounce and re-send your last input; a zero-motion mouse probe runs on every return to the foreground; stale peer sessions are kicked before retrying; wedged HID registration (some ROMs wedge it after a force-kill) self-heals automatically (rooted devices restart the Bluetooth stack)
 - **CONTROL button**: grey and disabled until a host is connected, then turns black and enters the control UI
 - **Five-finger gestures** (global, with animated feedback and text hints):
-  - Pinch in → switch to trackpad mode
-  - Pinch out → switch to keyboard mode
-  - Swipe left/right with five fingers → cycle the active control target among paired hosts
+  - Five-finger tap (all five fingers down, then quickly lifted in place) → return to the keyboard screen
+  - Deliberately only this one simple gesture: the pinch / spread / swipe family of geometric gestures was too hard to trigger and misfired on real devices, and has been removed entirely
 - **Portrait fused layout** (shared by keyboard and trackpad modes): trackpad on top (with the minimal "123" keypad toggle at the top-right, left/right click zones split by a short vertical line, and the active host name) plus a 26-key phone-style QWERTY on the bottom (three letter rows 10/9/7 + shift / backspace / space / return; tap shift for one-shot uppercase, hold it for combo capitals); keycaps always render letters uppercase
 - **87-key keyboard** (landscape fullscreen): TKL layout with Apple and Windows keymaps; black background, white text, seamless keys; press-down visual feedback plus haptics
 - **Landscape fullscreen**: in landscape the keyboard mode fills the screen with the 87-key TKL and the trackpad mode with the trackpad (configChanges in the manifest means no Activity recreation on rotation)
@@ -62,7 +61,7 @@ Or simply open the project directory in Android Studio.
 ### Tests
 
 ```bash
-./gradlew testDebugUnitTest   # 394 unit tests (incl. Robolectric Compose UI smoke tests)
+./gradlew testDebugUnitTest   # 386 unit tests (incl. Robolectric Compose UI smoke tests)
 ./gradlew lintDebug           # static analysis
 ```
 
@@ -74,7 +73,7 @@ Or simply open the project directory in Android Studio.
    - tap "Discoverable" (top-right), then **select this phone in the Bluetooth menu of the host device** (iPad / Mac / Windows, etc.)
 3. Complete pairing (see "Pairing code" below); the device row shows "Connected" once done
 4. On first connection the app asks whether the host is an Apple device or another device, and adapts the keyboard layout and trackpad gestures accordingly
-5. Tap CONTROL to enter the control UI; five-finger gestures switch modes / hosts at any time
+5. Tap CONTROL to enter the control UI; a five-finger tap returns to the keyboard screen at any time
 
 ### Pairing code
 
@@ -92,11 +91,11 @@ The digits shown on the pairing screen are the **exact digits used for pairing**
 app/src/main/java/com/pocketkeyboard/app/
 ├── MainActivity.kt          # Single Activity: permissions, five-finger gesture layer, page container
 ├── hid/                     # Bluetooth HID backend: HidDeviceTransport (system profile) + NullHidTransport fallback
-├── gesture/                 # Five-finger gesture engine, gesture arbiter (60ms window), HUD, page transitions
+├── gesture/                 # Five-finger gesture engine (five-finger tap), gesture arbiter (sliding gather window), HUD, page transitions
 ├── keyboard/                # 87-key / 26-key layout models, seamless keycaps, fn combos, portrait fused screen, HID report engine
 ├── trackpad/                # Trackpad gestures, Win/Apple gesture sets, numeric keypad sheet
 └── ui/                      # MainViewModel, pairing screen, theme
-app/src/test/                # 394 unit tests (layout/gesture/HID reports/Robolectric UI)
+app/src/test/                # 386 unit tests (layout/gesture/HID reports/Robolectric UI)
 ```
 
 See the in-code comments and the [cross-module contract](app/src/main/java/com/pocketkeyboard/app/hid/HidTransport.kt) for details.

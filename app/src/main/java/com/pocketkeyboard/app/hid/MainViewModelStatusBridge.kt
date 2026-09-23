@@ -74,8 +74,10 @@ class MainViewModelStatusBridge(
     override fun onHostDisconnected(address: String) {
         val active = viewModel.activeDevice.value
         if (active != null && active.address == address) {
-            val next = viewModel.pairedDevices.value.firstOrNull { it.address != address }
-            viewModel.setActiveDevice(next)
+            // 只清空，**不**把另一台「已配对但未必已连接」的设备顶上来——那会让首页
+            // 在没有任何连接时也显示着设备名（用户看到的「已连接」假象之一）。
+            // 目标让位由传输层 registry 决定，经 onActiveDeviceChanged 回写。
+            viewModel.setActiveDevice(null)
         }
         // 连接尝试随之中断：清掉「连接中 / 连接失败」的行内提示，交给退避重试重新发起
         if (viewModel.connectingDeviceAddress.value == address) {

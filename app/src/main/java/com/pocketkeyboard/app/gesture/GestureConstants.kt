@@ -6,9 +6,12 @@ import androidx.compose.ui.unit.dp
 /**
  * 五指手势引擎的全部判定阈值（集中在此，便于真机调试）。
  *
+ * 五指手势**只有短按一种**（5 指凑齐后快速原地抬起 → 返回键盘页面）；
+ * 收缩 / 张开 / 横滑那套几何判定已按产品决策移除（真机太难触发、互相误判）。
+ *
  * 调参指引：
- * - 觉得「收缩 / 张开」太难触发 → 调小 [PINCH_SHRINK_RATIO] / [SPREAD_GROW_RATIO]；
- * - 觉得「整体横滑」太灵敏 → 调大 [SWIPE_DISTANCE]；
+ * - 觉得短按太难触发 → 调大 [FIVE_FINGER_TAP_MAX_MS] / [FIVE_FINGER_TAP_SLOP]；
+ * - 觉得歇手（5 指放着不动）也误触发 → 调小 [FIVE_FINGER_TAP_MAX_MS]；
  * - 真机上五指经常凑不齐 → 调大 [FINGER_GATHER_RENEW_MS] / [FINGER_GATHER_MAX_MS]。
  *   注意凑指窗口同时决定触控板层要等多久：窗口内已按下的手指一旦明显在动
  *   （超过 [FINGER_GATHER_MOVE_SLOP]）且没有新手指继续落下，五指层会**立刻**放手，
@@ -20,31 +23,20 @@ object GestureConstants {
     const val REQUIRED_FINGER_COUNT: Int = 5
 
     /**
-     * 收缩判定比例：指尖平均间距缩小到初始值的 (1 - 0.30) 以下即判定为「五指收缩」。
+     * 五指短按的最长时长：从第 5 指落下（凑齐）到最后全部抬起之间超过它就不算短按。
      *
-     * 例：初始平均间距 400px，则 < 280px 时触发，切换到触控板模式。
+     * 取 600ms：真人「五指点一下」从凑齐到离屏通常 100–400ms；而「5 指歇在屏上」
+     * 至少是秒级。窗口从**凑齐**起算而不是第一指落下，摆指慢的人（凑指花 500ms+）
+     * 也能打出短按。
      */
-    const val PINCH_SHRINK_RATIO: Float = 0.30f
+    const val FIVE_FINGER_TAP_MAX_MS: Long = 600L
 
     /**
-     * 张开判定比例：指尖平均间距放大到初始值的 (1 + 0.30) 以上即判定为「五指张开」。
-     *
-     * 例：初始平均间距 400px，则 > 520px 时触发，切换到键盘模式。
+     * 五指短按的**单指**位移容差：跟踪期间任何一根手指相对自己落点的漂移超过它
+     * 就不算短按（那是拖动 / 滑动，不是轻点）。取 24dp，与 [FINGER_GATHER_MOVE_SLOP] 同量级。
+     * 刻意按单指而非质心判定：逐个抬指时质心跳变很大，按质心判会把正常抬手错杀成拖动。
      */
-    const val SPREAD_GROW_RATIO: Float = 0.30f
-
-    /**
-     * 五指整体横滑判定距离：5 个指尖的质心（平均位置）水平位移超过该值即判定为横滑，
-     * 在已配对设备间循环切换 [com.pocketkeyboard.app.ui.MainViewModel.activeDevice]。
-     *
-     * **真机实测（小米 21091116UC，1080×2400 / 440dpi）修正**：原值 200dp 折 550px，
-     * 而屏幕只有 1080px 宽——5 根手指的质心要横移过半屏才能触发，物理上不可能，
-     * 于是「五指横滑切设备」在真机上永远不触发（用户第二轮实测的三个症状之一）。
-     * 降到 80dp（220px，约 1/5 屏宽）：一次明确的整手横移即可触发，又远大于
-     * 捏合 / 张开时质心的附带漂移（那些被收缩 / 张开分支优先判掉，见
-     * [classifyFiveFingerGesture] 的优先级说明）。
-     */
-    val SWIPE_DISTANCE: Dp = 80.dp
+    val FIVE_FINGER_TAP_SLOP: Dp = 24.dp
 
     /**
      * 「有五指挥势意图」的手指数阈值。
@@ -147,7 +139,7 @@ object GestureConstants {
      * 所以「慢慢把 5 根手指摆开」不会被误判成拖动。
      *
      * **只对 1–2 指生效**（真机实测第三轮修正）：张开 / 捏合手势的手指是「边落边扩」的，
-     * 位移分分钟超过本阈值——若 3 指以上也据此放手，用户看到的症状就是「做张开 / 收缩
+     * 位移分分钟超过本阈值——若 3 指以上也据此放手，用户看到的症状就是「五指短按
      * 没反应」（手指一分开五指层就交还给了触控板层）。≥
      * [FIVE_FINGER_INTENT_FINGER_COUNT] 指（意图已确立）后不再因位移放手，
      * 只受 [FINGER_GATHER_MAX_MS] 总窗口上限约束。
@@ -159,14 +151,5 @@ object GestureConstants {
 
     /** HUD 淡出动画时长。 */
     const val HUD_FADE_MS: Int = 220
-
-    /** 设备切换「覆盖式」转场中，覆盖层停留时长。 */
-    const val DEVICE_SWITCH_COVER_HOLD_MS: Long = 1_000L
-
-    /** 几何量（质心 / 平均间距）的浮点抖动容差，避免把噪点当成位移。 */
-    const val GEOMETRY_EPSILON: Float = 0.5f
-
-    /** 一次横滑手势最多触发的设备切换次数（防止一次滑动连续跳多台）。 */
-    const val MAX_DEVICE_SWITCHES_PER_GESTURE: Int = 1
 
 }

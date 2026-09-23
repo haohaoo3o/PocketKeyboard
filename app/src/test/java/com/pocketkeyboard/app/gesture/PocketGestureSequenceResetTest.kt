@@ -86,9 +86,7 @@ class PocketGestureSequenceResetTest {
             arbiter = remember { GestureArbiter() }
             val handler = remember {
                 PocketGestureHandler(
-                    onPinch = { fiveFingerEvents += "pinch" },
-                    onSpread = { fiveFingerEvents += "spread" },
-                    onSwipe = { dir -> fiveFingerEvents += "swipe($dir)" },
+                    onFiveFingerTap = { fiveFingerEvents += "tap" },
                 )
             }
             Box(

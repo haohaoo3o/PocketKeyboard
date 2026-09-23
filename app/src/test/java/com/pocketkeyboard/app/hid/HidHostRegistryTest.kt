@@ -63,28 +63,6 @@ class HidHostRegistryTest {
     }
 
     @Test
-    fun `cycle active rotates through connected hosts`() {
-        val registry = HidHostRegistry()
-        listOf("A", "B", "C").forEach { address ->
-            registry.update(address) { entry(address, state = HidHostRegistry.STATE_CONNECTED) }
-        }
-        registry.setActive("A")
-
-        assertEquals("B", registry.cycleActive())
-        assertEquals("C", registry.cycleActive())
-        assertEquals("A", registry.cycleActive())
-    }
-
-    @Test
-    fun `cycle active is a no-op with a single connected host`() {
-        val registry = HidHostRegistry()
-        registry.update("A") { entry("A", state = HidHostRegistry.STATE_CONNECTED) }
-        registry.setActive("A")
-
-        assertEquals("A", registry.cycleActive())
-    }
-
-    @Test
     fun `preferred target falls back to first connected host`() {
         val registry = HidHostRegistry()
         assertNull(registry.preferredTarget())
@@ -123,7 +101,8 @@ class HidHostRegistryTest {
         assertEquals(4_000L, ReconnectPolicy.delayFor(3))
         assertEquals(8_000L, ReconnectPolicy.delayFor(4))
         assertEquals(15_000L, ReconnectPolicy.delayFor(20))
-        assertTrue(ReconnectPolicy.shouldRetry(1))
-        assertFalse(ReconnectPolicy.shouldRetry(ReconnectPolicy.MAX_ATTEMPTS))
+        // 封顶后一直 15s：重连没有次数上限（曾经的 MAX_ATTEMPTS 放弃语义已移除——
+        // 真机上那等于「操作永远没反应」）
+        assertEquals(15_000L, ReconnectPolicy.delayFor(200))
     }
 }

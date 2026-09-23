@@ -72,7 +72,7 @@ private val AppleSheetEasing = CubicBezierEasing(0.32f, 0.72f, 0f, 1f)
  * - 点击上方半透明遮罩 → 收起，回到触控板；
  * - 按系统返回键 → 收起（[BackHandler]）；
  * - 右上角「完成」按钮 → 收起；
- * - 每个键帽挂 `Modifier.pocketKeyGestures`，因此**五指收缩 / 张开 / 横滑依然有效**
+ * - 每个键帽挂 `Modifier.pocketKeyGestures`，因此**五指短按依然有效**
  *   （五指挥势层挂在更外层，读 Initial pass，不受 sheet 影响）。
  *
  * ## 为什么手写而不用 Material3 的 ModalBottomSheet

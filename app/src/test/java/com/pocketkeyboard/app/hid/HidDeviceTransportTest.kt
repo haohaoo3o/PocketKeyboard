@@ -644,23 +644,6 @@ class HidDeviceTransportTest {
         assertEquals(host2.address, report.address)
     }
 
-    @Test
-    fun `cycle active device rotates between connected hosts`() {
-        val h = harness()
-        val transport = h.transport
-        val listener = h.listener
-        val gateway = h.gateway
-        transport.start()
-        gateway.fireOpen()
-        gateway.appStatus(null, true)
-        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
-        gateway.connectionState(host2.address, HidHostRegistry.STATE_CONNECTED)
-
-        transport.cycleActiveDevice()
-
-        assertEquals(host2.address, listener.active?.address)
-    }
-
     // ---------------------------------------------------------------- 断开重连
 
     @Test
@@ -1426,5 +1409,172 @@ class HidDeviceTransportTest {
         // 明确点「连接」才恢复
         transport.connectHost(host.address)
         assertEquals(listOf(host.address), gateway.connectCalls)
+    }
+
+    // ---------------------------------------------------------------- 断联自愈（假连接问题）
+
+    @Test
+    fun `duplicate disconnect callbacks do not inflate the reconnect budget`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        val scheduler = h.scheduler
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+
+        // MIUI 真机实证：同一次断开回调会**派发两遍**（相隔 1ms）
+        gateway.connectionState(host.address, HidHostRegistry.STATE_DISCONNECTED)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_DISCONNECTED)
+
+        // 只记一次 attempt：第二遍是无跃变重复，不该把退避灌水成 delayFor(2)
+        assertEquals(ReconnectPolicy.delayFor(1), scheduler.pending[host.address]?.first)
+    }
+
+    @Test
+    fun `reconnect keeps retrying instead of giving up after the old budget`() {
+        val gateway = FakeGateway().apply { connectShouldFail = true }
+        val h = harness(gateway = gateway)
+        val transport = h.transport
+        val scheduler = h.scheduler
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.connectHost(host.address)
+        // 连跑 15 轮退避重试（超过旧实现的 MAX_ATTEMPTS = 12）：每轮之后都必须还有
+        // 下一次排队——「重连预算烧光就永久放弃」正是真机上「操作再也没反应」的元凶
+        repeat(15) { round ->
+            assertTrue("第 ${round + 1} 轮重试后不该放弃", scheduler.pending.containsKey(host.address))
+            scheduler.runPending(host.address)
+        }
+        assertTrue(scheduler.pending.containsKey(host.address))
+    }
+
+    @Test
+    fun `send failure while system-connected re-registers the hid app`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+        val registerCallsBefore = gateway.registerAppCalls
+
+        // 症状签名：系统真值说已连接、报告却发不出（注册被系统收走 / 楔死，回调已丢）。
+        // connectionStateOverrides 让「连接状态查询」也说已连接（回调触发 ≠ 状态查询，
+        // fake 里是两条独立通道）
+        gateway.connectionStateOverrides[host.address] = HidHostRegistry.STATE_CONNECTED
+        gateway.sendReportShouldFail = true
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_A.toByte()))
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_A.toByte()))
+
+        // 注册层自愈已启动：unregister 清残留 → 延迟重建代理重注册
+        assertTrue(gateway.unregisterAppCalls >= 1)
+        h.scheduler.runPending("#registration-retry")
+        gateway.fireOpen()
+        assertTrue(gateway.registerAppCalls > registerCallsBefore)
+    }
+
+    @Test
+    fun `send failure while system-disconnected marks dead stashes and reconnects`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        val scheduler = h.scheduler
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+        // registry 认为已连接（回调驱动），系统真值查询却说没连（死链 / 半开）
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+        gateway.connectionStateOverrides[host.address] = HidHostRegistry.STATE_DISCONNECTED
+
+        gateway.sendReportShouldFail = true
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_A.toByte()))
+        transport.sendKeyboardReport(0, byteArrayOf(HidUsage.KEY_A.toByte()))
+
+        assertFalse(transport.registry.isConnected(host.address))
+        assertTrue(h.listener.disconnectedHosts.contains(host.address))
+        assertTrue(scheduler.pending.containsKey(host.address))
+        // 半开链路被摁掉
+        assertTrue(gateway.disconnectCalls >= 1)
+
+        // 重连成功后，用户刚才敲的那份报告要补发（不是丢掉了事）
+        gateway.sentReports.clear()
+        gateway.sendReportShouldFail = false
+        scheduler.runPending(host.address)
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+        assertEquals(1, gateway.sentReports.size)
+    }
+
+    @Test
+    fun `start re-registers after the system silently unregistered the app`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+        assertEquals(1, gateway.registerAppCalls)
+
+        // 锁屏 / 后台期间被系统自动注销（回调到位的形态）
+        gateway.appStatus(null, false)
+        assertFalse(transport.isAppRegistered)
+
+        // 回到前台的 start() 必须补注册，而不是被 started 标志吞掉
+        transport.start()
+        gateway.fireOpen()
+        assertEquals(2, gateway.registerAppCalls)
+    }
+
+    @Test
+    fun `connect dispatch failures trigger registration recovery`() {
+        val gateway = FakeGateway().apply { connectShouldFail = true }
+        val h = harness(gateway = gateway)
+        val transport = h.transport
+        val scheduler = h.scheduler
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        transport.connectHost(host.address) // 下发失败 1
+        scheduler.runPending(host.address) // 下发失败 2
+        assertEquals(0, gateway.unregisterAppCalls)
+        scheduler.runPending(host.address) // 下发失败 3 → 转注册层自愈
+
+        assertTrue(gateway.unregisterAppCalls >= 1)
+    }
+
+    @Test
+    fun `probe active link sends harmless mouse reports and heals dead links`() {
+        val h = harness()
+        val transport = h.transport
+        val gateway = h.gateway
+        gateway.bonded.add(host)
+        transport.start()
+        gateway.fireOpen()
+        gateway.appStatus(null, true)
+
+        // 没有已连接目标：探活不发任何报告（也不会顶掉粘性断开）
+        transport.probeActiveLink()
+        assertTrue(gateway.sentReports.isEmpty())
+
+        gateway.connectionState(host.address, HidHostRegistry.STATE_CONNECTED)
+        gateway.connectionStateOverrides[host.address] = HidHostRegistry.STATE_CONNECTED
+        transport.probeActiveLink()
+        assertEquals(2, gateway.sentReports.size)
+        assertTrue(gateway.sentReports.all { it.reportId == HidReportFactory.REPORT_ID_MOUSE })
+
+        // 假连接形态：探活连续失败 + 系统真值仍说已连接 → 注册层自愈立刻启动
+        gateway.sentReports.clear()
+        gateway.sendReportShouldFail = true
+        transport.probeActiveLink()
+        assertTrue(gateway.unregisterAppCalls >= 1)
     }
 }

@@ -114,8 +114,9 @@ import kotlin.math.roundToInt
  *
  * ## 两个 mode 的视觉区分（B4，真机实测第三轮）
  *
- * 五指张开 → 键盘模式：键盘区权重增大（触控板区缩小）+ **自动弹出系统输入法**；
- * 五指收缩 → 触控板模式：触控板区权重增大（键盘区缩成一条、只剩修饰键排）+ **收起系统输入法**。
+ * 键盘模式（KEYBOARD / NUMPAD，五指短按也回到这里）：键盘区权重增大（触控板区缩小）
+ * + **自动弹出系统输入法**；
+ * 触控板模式（TRACKPAD）：触控板区权重增大（键盘区缩成一条、只剩修饰键排）+ **收起系统输入法**。
  * mode 切换本身仍走 `MainViewModel.mode` 与既有 HUD 文案（MainActivity 的
  * `PocketGestureHandler`），本页只负责「mode 变了之后视觉与输入法怎么跟着变」。
  *
@@ -172,16 +173,19 @@ fun FusedControlScreen(
     transport: HidTransport? = null,
 ) {
     val activeDevice by viewModel.activeDevice.collectAsStateWithLifecycle()
+    val activeAddress = activeDevice?.address
+    val connectedAddresses by viewModel.connectedDeviceAddresses.collectAsStateWithLifecycle()
+    val connectingAddress by viewModel.connectingDeviceAddress.collectAsStateWithLifecycle()
     val platform = activeDevice?.platform ?: DevicePlatform.OTHER
 
     // 竖屏两种 mode 的视觉必须可区分（B4）：KEYBOARD / NUMPAD = 键盘模式——键盘区（系统
     // 输入法唤起区）权重增大、自动弹出系统输入法；TRACKPAD = 触控板模式——触控板区权重
-    // 增大、键盘区缩到一条、系统输入法收起。五指收缩 / 张开切换的就是这个布尔量，
-    // 因此「张开看到键盘、收缩看到触控板」在竖屏同样成立（真机实测原两种 mode 视觉
+    // 增大、键盘区缩到一条、系统输入法收起。五指短按（→键盘）/ dock 切换的就是这个布尔量，
+    // 因此「键盘模式看到键盘、触控板模式看到触控板」在竖屏同样成立（真机实测原两种 mode 视觉
     // 完全相同，用户完全看不出模式切没切）。
     val keyboardMode = mode == AppMode.KEYBOARD || mode == AppMode.NUMPAD
 
-    // IME 归属权（真机实测：五指张开 → 键盘模式后系统键盘时弹时不弹的竞态根因）：
+    // IME 归属权（真机实测：切到键盘模式后系统键盘时弹时不弹的竞态根因）：
     // AnimatedContent 切 mode（TRACKPAD ↔ KEYBOARD）时会短暂同时存在**两个**
     // FusedControlScreen 实例——退场实例与入场实例的 LaunchedEffect 都订阅同一个
     // 闸门状态，闸门复位那一刻两边同时醒来：入场的要 show()、退场的要 hide()
@@ -346,6 +350,8 @@ fun FusedControlScreen(
             FusedTrackpadArea(
                 platform = platform,
                 device = activeDevice,
+                connected = activeAddress != null && activeAddress in connectedAddresses,
+                connecting = activeAddress != null && activeAddress == connectingAddress,
                 handler = trackpadHandler,
                 arbiter = arbiter,
                 thresholds = thresholds,
@@ -423,7 +429,7 @@ internal object FusedMetrics {
 /**
  * 触控板区在竖屏融合页 Column 里的权重（B4 + 问题 3b）。
  *
- * 键盘模式（[keyboardMode] = true，五指张开 / KEYBOARD / NUMPAD）：键盘区（系统输入法唤起区）
+ * 键盘模式（[keyboardMode] = true，KEYBOARD / NUMPAD）：键盘区（系统输入法唤起区）
  * 拿到主要高度，触控板区相应缩小——用户要做的是「打字」而不是「指向」，屏幕下半还有
  * 弹出的系统输入法。触控板模式则反过来：触控板区拿到绝大部分高度，键盘区缩成一条
  * （仅留修饰键排）。
@@ -479,6 +485,8 @@ internal object FusedLayout {
 private fun FusedTrackpadArea(
     platform: DevicePlatform,
     device: PairedDevice?,
+    connected: Boolean,
+    connecting: Boolean,
     handler: TrackpadGestureHandler,
     arbiter: GestureArbiter,
     thresholds: TrackpadThresholds,
@@ -566,15 +574,19 @@ private fun FusedTrackpadArea(
         // 触控区底部：当前控制设备名（不加 pointerInput，对触摸完全透明）
         FusedDeviceNameStrip(
             device = device,
+            connected = connected,
+            connecting = connecting,
             modifier = Modifier.align(Alignment.BottomCenter),
         )
     }
 }
 
-/** 融合页触控区底部：当前控制设备名（无设备时显示未连接提示）。对触摸完全透明。 */
+/** 融合页触控区底部：当前控制设备名 + 真实连接状态（无设备时显示未连接提示）。对触摸完全透明。 */
 @Composable
 private fun FusedDeviceNameStrip(
     device: PairedDevice?,
+    connected: Boolean,
+    connecting: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val platformLabel = stringResource(
@@ -584,10 +596,17 @@ private fun FusedDeviceNameStrip(
             R.string.pairing_device_platform_other
         }
     )
-    val text = if (device == null) {
-        stringResource(R.string.trackpad_no_device)
-    } else {
-        stringResource(R.string.trackpad_active_device_format, device.name, platformLabel)
+    // 状态必须真实（假连接问题）：只有系统真值已连接才写「已连接」，
+    // 连接尝试中写「连接中…」，其余一律「已断开」——设备名不再自带「像已连接」的暗示
+    val text = when {
+        device == null -> stringResource(R.string.trackpad_no_device)
+        connected -> stringResource(
+            R.string.trackpad_device_status_connected,
+            device.name,
+            platformLabel,
+        )
+        connecting -> stringResource(R.string.trackpad_device_status_connecting, device.name)
+        else -> stringResource(R.string.trackpad_device_status_disconnected, device.name)
     }
 
     Box(

@@ -16,16 +16,15 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * 五指挥势的 UI 冒烟测试（Robolectric + Compose 多指注入，JVM 可复现）。
+ * 五指短按的 UI 冒烟测试（Robolectric + Compose 多指注入，JVM 可复现）。
  *
- * 本轮竖屏融合 / 横屏全屏改造把五指挥势层（`Modifier.pocketGestures`）继续挂在
- * 页面容器最底层（MainActivity 里承载 `AnimatedContent` 的 Box），因此两个方向下
- * 手势都应生效。Compose 测试 API 1.7 起支持多指注入（`down(pointerId, …)`），
- * 这里用它按真实时序凑满 5 指（仲裁窗口 60ms 内）做一次收缩 / 张开：
+ * 产品决策（2026-09-23）：五指手势**只保留短按一种**——5 指凑齐后快速原地抬起
+ * → 返回键盘页面；收缩 / 张开 / 横滑那套复杂几何判定已整体移除（真机太难触发、
+ * 互相误判，用户明确要求「不要搞复杂手势操作了」）。
  *
- * - 竖屏：五指收缩 → HUD「触控板模式」；再五指张开 → HUD「键盘模式」；
- * - 横屏：87 键全屏下五指收缩 → 模式切到 TRACKPAD（esc 消失、123 开关出现），
- *   证明横屏五指挥势仍然生效。
+ * - 竖屏：触控板模式下五指短按 → 回键盘模式（HUD「键盘模式」为证）；
+ *   键盘模式下五指短按是幂等空操作（不弹 HUD）；
+ * - 横屏：全屏触控板下五指短按 → 切回 87 键键盘（esc 出现）。
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34])
@@ -35,27 +34,35 @@ class FiveFingerGestureSmokeTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun portrait_fiveFingerPinchAndSpread_switchModeWithHud() {
+    fun portrait_fiveFingerTap_returnsToKeyboardWithHud() {
         composeRule.waitForIdle()
 
-        // 配对页 dock 常显，直接点「键盘」进入竖屏融合布局
-        composeRule.onNodeWithText("键盘").performClick()
+        // 配对页 dock 常显，直接点「触控板」进入触控板模式
+        composeRule.onNodeWithText("触控板").performClick()
         composeRule.waitForIdle()
 
-        // 五指收缩 → 触控板模式（HUD 文案是手势识别成功的直接证据）
-        fiveFingerPinch()
-        composeRule.onNodeWithText("触控板模式").assertExists()
-
-        // 五指张开 → 键盘模式
-        fiveFingerSpread()
+        // 五指短按 → 返回键盘页面（HUD 文案是手势识别成功的直接证据）
+        composeRule.fiveFingerTap()
         composeRule.onNodeWithText("键盘模式").assertExists()
     }
 
+    @Test
+    fun portrait_fiveFingerTapOnKeyboard_isNoOp() {
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("键盘").performClick()
+        composeRule.waitForIdle()
+
+        // 已在键盘页面：五指短按是幂等空操作，不弹 HUD
+        composeRule.fiveFingerTap()
+        composeRule.onAllNodesWithText("键盘模式").assertCountEquals(0)
+    }
+
     /**
-     * 横屏：87 键全屏键盘下做一次五指收缩。
+     * 横屏：全屏触控板下做一次五指短按。
      *
-     * 竖屏两种 mode 视觉相同（都是融合布局），横屏则一目了然：
-     * KEYBOARD = 全屏 87 键（esc 在），TRACKPAD = 全屏触控板（esc 不在、123 开关在）。
+     * 横屏两页视觉一目了然：TRACKPAD = 全屏触控板（123 开关在、esc 不在），
+     * KEYBOARD = 全屏 87 键（esc 在）。短按后 esc 出现即证明切回了键盘页。
      */
     @RunWith(AndroidJUnit4::class)
     @Config(sdk = [34], qualifiers = "land")
@@ -65,95 +72,43 @@ class FiveFingerGestureSmokeTest {
         val composeRule = createAndroidComposeRule<MainActivity>()
 
         @Test
-        fun landscape_fiveFingerPinch_switchesTklToFullscreenTrackpad() {
+        fun landscape_fiveFingerTap_returnsFromTrackpadToTklKeyboard() {
             composeRule.waitForIdle()
 
-            // 横屏配对页 dock 常显，点「键盘」进入全屏 87 键
-            composeRule.onNodeWithText("键盘").performClick()
+            // 横屏配对页 dock 常显，点「触控板」进入全屏触控板
+            composeRule.onNodeWithText("触控板").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithText("123").assertExists()
+            composeRule.onAllNodesWithText("esc").assertCountEquals(0)
+
+            // 五指短按 → 切回 87 键
+            composeRule.fiveFingerTap()
             composeRule.waitForIdle()
             composeRule.onAllNodesWithText("esc").onFirst().assertExists()
-
-            // 五指收缩 → 切到 TRACKPAD：87 键消失、全屏触控板（123 开关）出现
-            fiveFingerPinch()
-            composeRule.waitForIdle()
-            composeRule.onAllNodesWithText("esc").assertCountEquals(0)
-            composeRule.onNodeWithText("触控板模式").assertExists()
-        }
-
-        private fun fiveFingerPinch() = with(composeRule) {
-            onRoot().performTouchInput {
-                val y = centerY
-                // 5 指横向拉开（一次性全部落下：必须在 60ms 仲裁窗口内凑满）
-                down(1, Offset(width * 0.04f, y))
-                down(2, Offset(width * 0.28f, y))
-                down(3, Offset(width * 0.50f, y))
-                down(4, Offset(width * 0.72f, y))
-                down(5, Offset(width * 0.96f, y))
-                // 向中间收拢：平均间距缩到初始的 30% 以下即判定为收缩
-                moveTo(1, Offset(width * 0.40f, y))
-                moveTo(2, Offset(width * 0.45f, y))
-                moveTo(3, Offset(width * 0.50f, y))
-                moveTo(4, Offset(width * 0.55f, y))
-                moveTo(5, Offset(width * 0.60f, y))
-                up(1)
-                up(2)
-                up(3)
-                up(4)
-                up(5)
-            }
-            waitForIdle()
         }
     }
+}
 
-    /**
-     * 五指收缩：5 指横向拉开后向中间收拢（间距缩到初始 30% 以下 → onPinch）。
-     *
-     * 全部 down 在同一个 `performTouchInput` 块里连续注入，凑满 5 指的时间落在
-     * [com.pocketkeyboard.app.gesture.GestureConstants.FINGER_GATHER_MAX_MS]
-     * 凑指窗口内，手势归五指挥势层而不是触控板层。
-     */
-    private fun fiveFingerPinch() = with(composeRule) {
-        onRoot().performTouchInput {
-            val y = centerY
-            down(1, Offset(width * 0.04f, y))
-            down(2, Offset(width * 0.28f, y))
-            down(3, Offset(width * 0.50f, y))
-            down(4, Offset(width * 0.72f, y))
-            down(5, Offset(width * 0.96f, y))
-            moveTo(1, Offset(width * 0.40f, y))
-            moveTo(2, Offset(width * 0.45f, y))
-            moveTo(3, Offset(width * 0.50f, y))
-            moveTo(4, Offset(width * 0.55f, y))
-            moveTo(5, Offset(width * 0.60f, y))
-            up(1)
-            up(2)
-            up(3)
-            up(4)
-            up(5)
-        }
-        waitForIdle()
+/**
+ * 五指短按的注入手势：5 指原地落下后立刻全部抬起（无位移）。
+ *
+ * 全部 down / up 在同一个 `performTouchInput` 块里连续注入、事件时间不动，
+ * 因此「凑齐 → 抬起」时长为 0，落在
+ * [com.pocketkeyboard.app.gesture.GestureConstants.FIVE_FINGER_TAP_MAX_MS] 的短按窗口内。
+ */
+private fun androidx.compose.ui.test.junit4.ComposeContentTestRule.fiveFingerTap() {
+    onRoot().performTouchInput {
+        val y = centerY
+        down(1, Offset(width * 0.04f, y))
+        down(2, Offset(width * 0.28f, y))
+        down(3, Offset(width * 0.50f, y))
+        down(4, Offset(width * 0.72f, y))
+        down(5, Offset(width * 0.96f, y))
+        up(1)
+        up(2)
+        up(3)
+        up(4)
+        up(5)
     }
-
-    /** 五指张开：5 指先并拢再拉开（间距放大到初始 130% 以上 → onSpread）。 */
-    private fun fiveFingerSpread() = with(composeRule) {
-        onRoot().performTouchInput {
-            val y = centerY
-            down(1, Offset(width * 0.42f, y))
-            down(2, Offset(width * 0.46f, y))
-            down(3, Offset(width * 0.50f, y))
-            down(4, Offset(width * 0.54f, y))
-            down(5, Offset(width * 0.58f, y))
-            moveTo(1, Offset(width * 0.04f, y))
-            moveTo(2, Offset(width * 0.28f, y))
-            moveTo(3, Offset(width * 0.50f, y))
-            moveTo(4, Offset(width * 0.72f, y))
-            moveTo(5, Offset(width * 0.96f, y))
-            up(1)
-            up(2)
-            up(3)
-            up(4)
-            up(5)
-        }
-        waitForIdle()
-    }
+    waitForIdle()
 }

@@ -84,7 +84,7 @@ import kotlin.math.roundToInt
  *
  * ## 与其它模块的关系
  * - 手势经 [GestureArbiter] 与页面容器最底层的 `Modifier.pocketGestures` 仲裁：
- *   60ms 内凑满 5 指归五指挥势层（收缩 / 张开切模式、整体横滑切设备），否则归本页的
+ *   凑指窗口内凑满 5 指归五指挥势层（五指短按返回键盘页），否则归本页的
  *   1–4 指手势，详见 [TrackpadPointerInput] 里的详细注释；
  * - 所有 HID 输出严格走 [HidTransport] 契约接口，见 [TrackpadHidActions]；
  * - 小键盘从底部以苹果式 sheet 滑入（[NumpadSheet]），不切换 `MainViewModel.mode`，
@@ -101,6 +101,9 @@ fun TrackpadScreen(
     transport: HidTransport? = null,
 ) {
     val activeDevice by viewModel.activeDevice.collectAsStateWithLifecycle()
+    val activeAddress = activeDevice?.address
+    val connectedAddresses by viewModel.connectedDeviceAddresses.collectAsStateWithLifecycle()
+    val connectingAddress by viewModel.connectingDeviceAddress.collectAsStateWithLifecycle()
     val platform = activeDevice?.platform ?: DevicePlatform.OTHER
 
     // 键盘页偏好（颜色 / 字号 / 震感）：小键盘复用键盘页 KeyCap，偏好链路必须接通，
@@ -130,7 +133,7 @@ fun TrackpadScreen(
     }
 
     // 小键盘 sheet 开关：只在用户显式操作（点右上角开关 / 点遮罩 / 按返回键）时变化。
-    // 控制设备变化（五指横滑、对端重连）不被动收起——那会打断连续的数字录入，
+    // 控制设备变化（对端重连）不被动收起——那会打断连续的数字录入，
     // 而 sheet 本来就是用户主动打开的覆盖层。
     var numpadVisible by remember { mutableStateOf(false) }
 
@@ -156,9 +159,11 @@ fun TrackpadScreen(
                 .padding(12.dp),
         )
 
-        // 底部 28dp 安全区：当前控制设备名
+        // 底部 28dp 安全区：当前控制设备名 + 真实连接状态
         DeviceNameStrip(
             device = activeDevice,
+            connected = activeAddress != null && activeAddress in connectedAddresses,
+            connecting = activeAddress != null && activeAddress == connectingAddress,
             modifier = Modifier.align(Alignment.BottomCenter),
         )
 
@@ -259,6 +264,8 @@ private fun TrackpadSurface(
 @Composable
 private fun DeviceNameStrip(
     device: PairedDevice?,
+    connected: Boolean,
+    connecting: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val platformLabel = stringResource(
@@ -268,10 +275,17 @@ private fun DeviceNameStrip(
             R.string.pairing_device_platform_other
         }
     )
-    val text = if (device == null) {
-        stringResource(R.string.trackpad_no_device)
-    } else {
-        stringResource(R.string.trackpad_active_device_format, device.name, platformLabel)
+    // 状态必须真实（假连接问题）：只有系统真值已连接才写「已连接」，
+    // 连接尝试中写「连接中…」，其余一律「已断开」——设备名不再自带「像已连接」的暗示
+    val text = when {
+        device == null -> stringResource(R.string.trackpad_no_device)
+        connected -> stringResource(
+            R.string.trackpad_device_status_connected,
+            device.name,
+            platformLabel,
+        )
+        connecting -> stringResource(R.string.trackpad_device_status_connecting, device.name)
+        else -> stringResource(R.string.trackpad_device_status_disconnected, device.name)
     }
 
     // 这一层不加 pointerInput：对触摸完全透明，落在安全区里的手指仍由触控区处理

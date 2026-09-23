@@ -264,7 +264,10 @@
 
     <!-- 触控板页 -->
     <string name="trackpad_title">触控板</string>
-    <string name="trackpad_active_device_format">控制设备：%1$s（%2$s）</string>
+    <!-- 设备名条的连接状态前缀（假连接问题修复：不再无条件显示设备名像「已连接」） -->
+    <string name="trackpad_device_status_connected">已连接：%1$s（%2$s）</string>
+    <string name="trackpad_device_status_connecting">连接中…%1$s</string>
+    <string name="trackpad_device_status_disconnected">已断开：%1$s</string>
     <string name="trackpad_no_device">未选择控制设备</string>
     <string name="trackpad_numpd_toggle">123</string>
     <string name="cd_numpad_toggle">打开或收起数字小键盘</string>
@@ -307,16 +310,13 @@
          ============================================================ -->
 
     <!-- HUD 提示（屏幕中央黑底半透明圆角、白字，1 秒后淡出） -->
-    <string name="hud_trackpad_mode">触控板模式</string>
     <string name="hud_keyboard_mode">键盘模式</string>
-    <string name="hud_device_switched">已切换至 %1$s</string>
-    <string name="hud_no_paired_device">暂无已配对设备</string>
 
     <!-- 手势说明（配对页底部提示） -->
     <string name="gesture_hint_title">五指挥势</string>
-    <string name="gesture_hint_body">五指收缩进入触控板，五指张开回到键盘，五指整体左右滑动在已配对设备间循环切换。</string>
-    <string name="trackpad_gesture_hint">单指拖动移动指针，双指上下滑动滚动页面；五指收缩、张开与整体横滑由底层手势层接管。</string>
-    <string name="keyboard_gesture_hint">按键只响应单指；同时按下五指向内收缩可切换到触控板。</string>
+    <string name="gesture_hint_body">五指同时按下、快速原地抬起（短按）即可返回键盘页面。</string>
+    <string name="trackpad_gesture_hint">单指拖动移动指针，双指上下滑动滚动页面；五指短按返回键盘页面。</string>
+    <string name="keyboard_gesture_hint">按键只响应单指，多指同时按下不会误触按键；五指短按返回键盘页面。</string>
 
     <!-- ============================================================
          数字小键盘（app/src/main/java/com/pocketkeyboard/app/trackpad/）

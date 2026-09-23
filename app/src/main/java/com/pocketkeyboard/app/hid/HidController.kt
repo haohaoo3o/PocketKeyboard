@@ -57,14 +57,17 @@ class HidController(
         deviceTransport?.setActiveDevice(address)
     }
 
-    /** 在已连接设备间循环切换（五指左右滑手势）。 */
-    fun cycleActiveDevice() {
-        deviceTransport?.cycleActiveDevice()
-    }
-
     /** 主动连接某个已配对设备。 */
     fun connectHost(address: String) {
         deviceTransport?.connectHost(address)
+    }
+
+    /**
+     * 回到前台时向已连接目标发零位移鼠标报告探活（详见
+     * [HidDeviceTransport.probeActiveLink]）：假连接在解锁屏幕那一刻就被发现并自愈。
+     */
+    fun probeActiveLink() {
+        deviceTransport?.probeActiveLink()
     }
 
     /** 断开某个设备。 */

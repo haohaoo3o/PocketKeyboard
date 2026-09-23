@@ -17,7 +17,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketkeyboard.app.gesture.GestureArbiter
 import com.pocketkeyboard.app.gesture.PocketGestureHandler
-import com.pocketkeyboard.app.gesture.SwipeDirection
 import com.pocketkeyboard.app.gesture.pocketGestures
 import com.pocketkeyboard.app.hid.HidTransport
 import com.pocketkeyboard.app.hid.MouseButton
@@ -114,9 +113,7 @@ class TrackpadGestureArbitrationTest {
     private val fiveFingerEvents = mutableListOf<String>()
 
     private fun fiveFingerHandler() = PocketGestureHandler(
-        onPinch = { fiveFingerEvents += "pinch" },
-        onSpread = { fiveFingerEvents += "spread" },
-        onSwipe = { direction: SwipeDirection -> fiveFingerEvents += "swipe($direction)" },
+        onFiveFingerTap = { fiveFingerEvents += "tap" },
     )
 
     /** 按 MainActivity 的真实层级挂页面：五指挥势层在父节点，触控板页是它的子节点。 */
@@ -239,8 +236,8 @@ class TrackpadGestureArbitrationTest {
 
     // ---------------------------------------------------------------- 五指挥势的归属
 
-    /** 5 指横向拉开后向中间收拢：平均间距缩到初始 30% 以下 → onPinch。 */
-    private fun androidx.compose.ui.test.TouchInjectionScope.pinch(
+    /** 五指短按：5 指原地落下再全部抬起（无位移、无间隔）。 */
+    private fun androidx.compose.ui.test.TouchInjectionScope.fiveFingerTap(
         fingerGapMillis: Long = 0L,
     ) {
         val y = height * 0.4f
@@ -253,11 +250,6 @@ class TrackpadGestureArbitrationTest {
         down(4, Offset(width * 0.72f, y))
         if (fingerGapMillis > 0L) advanceEventTime(fingerGapMillis)
         down(5, Offset(width * 0.96f, y))
-        moveTo(1, Offset(width * 0.40f, y))
-        moveTo(2, Offset(width * 0.45f, y))
-        moveTo(3, Offset(width * 0.50f, y))
-        moveTo(4, Offset(width * 0.55f, y))
-        moveTo(5, Offset(width * 0.60f, y))
         up(1)
         up(2)
         up(3)
@@ -269,10 +261,10 @@ class TrackpadGestureArbitrationTest {
     fun `五指一次性落下时归五指挥势层`() {
         showTrackpadPage()
 
-        composeRule.onRoot().performTouchInput { pinch() }
+        composeRule.onRoot().performTouchInput { fiveFingerTap() }
         composeRule.waitForIdle()
 
-        assertEquals(listOf("pinch"), fiveFingerEvents)
+        assertEquals(listOf("tap"), fiveFingerEvents)
         assertEquals("手势归五指层，触控板层不该发报告", emptyList<String>(), transport.events)
     }
 
@@ -283,11 +275,11 @@ class TrackpadGestureArbitrationTest {
         composeRule.onRoot().performTouchInput {
             // 每根手指间隔 120ms：旧实现的 60ms 固定窗口必然凑不齐（Bug 4 的根因），
             // 滑动凑指窗口（续期 300ms / 上限 800ms）下应当照常识别
-            pinch(fingerGapMillis = 120L)
+            fiveFingerTap(fingerGapMillis = 120L)
         }
         composeRule.waitForIdle()
 
-        assertEquals(listOf("pinch"), fiveFingerEvents)
+        assertEquals(listOf("tap"), fiveFingerEvents)
         assertEquals("手势归五指层，触控板层不该发报告", emptyList<String>(), transport.events)
     }
 
@@ -383,11 +375,11 @@ class TrackpadGestureArbitrationTest {
     }
 
     @Test
-    fun `五指整体横滑切换设备`() {
+    fun `五指横滑不再触发任何手势（复杂手势已移除）`() {
         showTrackpadPage()
 
         composeRule.onRoot().performTouchInput {
-            // 5 指一起向右平移 300px：质心横移超过 200dp → 横滑
+            // 5 指一起向右平移 300px：位移远超短按容差 → 既不是短按、也没有横滑语义
             val y = height * 0.4f
             down(1, Offset(width * 0.04f, y))
             down(2, Offset(width * 0.28f, y))
@@ -407,7 +399,7 @@ class TrackpadGestureArbitrationTest {
         }
         composeRule.waitForIdle()
 
-        assertEquals(listOf("swipe(RIGHT)"), fiveFingerEvents)
+        assertEquals("带位移的五指动作不该触发短按", emptyList<String>(), fiveFingerEvents)
         assertEquals("手势归五指层，触控板层不该发报告", emptyList<String>(), transport.events)
     }
 }

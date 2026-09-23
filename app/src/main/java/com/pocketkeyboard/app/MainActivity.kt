@@ -71,7 +71,6 @@ import com.pocketkeyboard.app.gesture.LocalFiveFingerGate
 import com.pocketkeyboard.app.gesture.GestureFeedback
 import com.pocketkeyboard.app.gesture.PocketGestureHandler
 import com.pocketkeyboard.app.gesture.applePageTransitionSpec
-import com.pocketkeyboard.app.gesture.cycleActiveDevice
 import com.pocketkeyboard.app.gesture.gestureStateSelfHeal
 import com.pocketkeyboard.app.gesture.pocketGestures
 import com.pocketkeyboard.app.gesture.rememberGestureHudState
@@ -106,7 +105,7 @@ import kotlinx.coroutines.delay
  * - 一旦切换页面模式（点 dock 项或五指挥势切模式）立即再次自动隐藏。
  *
  * 本 Activity 还持有**唯一**的 [HidController]（HID 后端入口）：随根组合启停，
- * `controller.transport` 注入键盘页 / 触控板页，五指横滑与配对页点击设备时调用
+ * `controller.transport` 注入键盘页 / 触控板页，配对页点击设备时调用
  * `controller.setActiveDevice` 同步传输层控制目标。页面级各自持有 controller 会导致
  * 切页反复 `registerApp` / `unregisterApp`（对端掉线、注册被拒后不自愈），故提升到这里。
  */
@@ -171,7 +170,7 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
     // 页面级输入法收起（唯一 owner，见 FusedControlScreen 里 isActivePage 的说明）：
     // 竖屏融合页内部 mode 切换的弹 / 收由该页自己管；这里只管**离开融合页**的两种
     // 去向——去配对页、转横屏（横屏是 87 键 / 全屏触控板，不需要系统输入法）。
-    // 放在退场实例的 onDispose 里会与入场实例的自动弹出竞态（真机实测五指张开
+    // 放在退场实例的 onDispose 里会与入场实例的自动弹出竞态（真机实测五指短按
     // 切键盘模式后，退场页 dispose 把刚弹出的输入法又收回去）。
     val imeFocusManager = LocalFocusManager.current
     val imeKeyboardController = LocalSoftwareKeyboardController.current
@@ -182,7 +181,7 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
         }
     }
 
-    // 手势视觉反馈（HUD 文字提示 + 设备切换覆盖式转场）
+    // 手势视觉反馈（HUD 文字提示）
     val hudState = rememberGestureHudState()
 
     // 五指挥意图闸门：手势协程在凑指窗口里看到 ≥3 指时置位，页面 UI 层据此
@@ -212,56 +211,30 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         bluetoothPermissionsGranted = hasBluetoothPermissions(context)
         if (bluetoothPermissionsGranted) hidController.start()
+        // 回前台探活（零位移鼠标报告 ×2）：锁屏 / 后台期间注册可能已被系统收走而
+        // 回调丢失，「已连接」是假的——探活走发送失败自愈链，解锁即恢复，
+        // 不用等用户敲第一下才发现断联
+        hidController.probeActiveLink()
     }
     DisposableEffect(hidController) {
         onDispose { hidController.stop() }
     }
 
     // HUD 文案全部来自 strings.xml（组合期解析，手势回调里直接用）
-    val trackpadHud = stringResource(R.string.hud_trackpad_mode)
     val keyboardHud = stringResource(R.string.hud_keyboard_mode)
-    val deviceSwitchedHud = stringResource(R.string.hud_device_switched)
-    val noDeviceHud = stringResource(R.string.hud_no_paired_device)
 
     val gestureHandler = remember(
         viewModel,
         hudState,
-        hidController,
-        trackpadHud,
         keyboardHud,
-        deviceSwitchedHud,
-        noDeviceHud,
     ) {
         PocketGestureHandler(
-            // 五指收缩 → 触控板模式
-            onPinch = {
-                viewModel.setMode(AppMode.TRACKPAD)
-                hudState.show(trackpadHud)
-            },
-            // 五指张开 → 键盘模式
-            onSpread = {
-                viewModel.setMode(AppMode.KEYBOARD)
-                hudState.show(keyboardHud)
-            },
-            // 五指整体横滑 → 在已配对设备间循环切换 activeDevice
-            onSwipe = { direction ->
-                // 直接读 StateFlow 的当前值，避免 remember 住一份会过期的快照
-                val devices = viewModel.pairedDevices.value
-                if (devices.isEmpty()) {
-                    hudState.show(noDeviceHud)
-                    return@PocketGestureHandler
-                }
-                val next = cycleActiveDevice(devices, viewModel.activeDevice.value, direction)
-                if (next != null) {
-                    // 先同步 HID 后端的控制目标（registry）：只写 ViewModel 的话
-                    // sendToActive 仍把报告发给上一个 activeAddress，键鼠事件打错设备。
-                    // registry 认识该地址时 setActiveDevice 会经 bridge 回写一次
-                    // ViewModel（平台是探测值），因此之后再用 pairedDevices 里的
-                    // 条目（平台以 DataStore 为准）覆盖，保证最终展示与布局正确。
-                    hidController.setActiveDevice(next.address)
-                    viewModel.setActiveDevice(next)
-                    // 覆盖式转场 + HUD 文案（「已切换至 xxx」）
-                    hudState.showDeviceSwitch(deviceSwitchedHud.format(next.name))
+            // 五指短按 → 返回键盘页面（产品决策：不再做收缩 / 张开 / 横滑那套复杂手势）。
+            // 触控板 / 小键盘 / 配对页上都切回键盘；键盘页上是幂等空操作（不弹 HUD）。
+            onFiveFingerTap = {
+                if (viewModel.mode.value != AppMode.KEYBOARD) {
+                    viewModel.setMode(AppMode.KEYBOARD)
+                    hudState.show(keyboardHud)
                 }
             },
             // 凑指窗口内出现 ≥3 指 → 有五指挥势意图：闸门置位，页面据此收起
@@ -283,7 +256,7 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
     //   不能一直占着底部空间、也不能一直挡着五指挥势。期间每次交互续期。
     var dockEdgeActivated by remember { mutableStateOf(false) }
     LaunchedEffect(mode) {
-        // mode 一变（点 dock 项 / 五指挥势切模式 / 五指横滑不改 mode 不触发）就收回激活态
+        // mode 一变（点 dock 项 / 五指短按切模式）就收回激活态
         dockEdgeActivated = false
     }
     // 每次与 dock 交互都把 5 秒倒计时**重新开始**（顺延）。用一个自增计数做 key：
@@ -411,7 +384,7 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
                     }
                 }
 
-                // HUD 与设备切换覆盖层：画在最上层，但不加 pointerInput，对触摸完全透明
+                // HUD 文字提示：画在最上层，但不加 pointerInput，对触摸完全透明
                 GestureFeedback(state = hudState)
             }
         }
@@ -479,7 +452,7 @@ internal fun dockVisibleFor(mode: AppMode, edgeActivated: Boolean): Boolean =
  *    边缘抢占同思路）；达到阈值即调 [onActivate]，dock 以苹果式 spring 滑入；
  * 3. **≥5 指针立即放行**：一旦按下指针数达到 [GestureConstants.REQUIRED_FINGER_COUNT]，
  *    本层停止消费、直接结束本轮 `awaitEachGesture`。五指挥势层同样读 Initial pass 且
- *    **不检查 isConsumed**，所以它仍能完整拿到这 5 根手指做收缩 / 张开 / 横滑识别——
+ *    **不检查 isConsumed**，所以它仍能完整拿到这 5 根手指做五指短按识别——
  *    单指边缘滑动因此也不会被五指挥势层吃掉；
  * 4. **不参与 GestureArbiter 仲裁**：本层只对「单指 + 落在边缘带」这一种触摸感兴趣，
  *    其余全部原样放行，1–4 指的触控板手势 / 单指打字不受任何影响；

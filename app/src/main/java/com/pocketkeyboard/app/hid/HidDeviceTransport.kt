@@ -67,8 +67,7 @@ import android.util.Log
  * ## 多设备
  * - [HidHostRegistry] 维护已连接主机集合与连接顺序；
  * - 所有 `sendXxx` 只发给 `registry.preferredTarget()`（默认当前 activeDevice）；
- * - 主机断开后按 [ReconnectPolicy] 指数退避重连；
- * - 五指左右滑切设备：调用 [cycleActiveDevice]。
+ * - 主机断开后按 [ReconnectPolicy] 指数退避重连。
  *
  * ## 连接状态判定（A1）与连接建立（A2）
  * - **A1**：registry 的「已连接」只由系统真值驱动——`onConnectionStateChanged` 与
@@ -85,6 +84,12 @@ import android.util.Log
  *   仍未连上（回调丢失 / 对端不接受）→ 判失败 + 退避重试，「连接中…」绝不永久挂住。
  * - **粘性断开**：用户点「断开」后记入 [userDisconnects]，对端回连 / 对账轮询都不自动
  *   恢复（否则断开按钮会被系统回连立刻顶回去），点「连接」或删除设备才解除。
+ * - **发送失败自愈**：`sendReport` 返回 false 是「链路已死」的确定性信号（此前只记日志，
+ *   用户看到的就是「显示已连接、操作没反应」）。连续失败即分流自愈——系统真值仍说
+ *   已连接 = 注册被系统收走（[forceReRegister] 重注册），说没连 = 死链（断开 + 退避重连，
+ *   重试前先 `disconnect` 摁掉对端陈旧会话）。回前台的 [probeActiveLink] 用两份零位移
+ *   鼠标报告主动探活，把发现断联的时机从「敲第一下」提前到「解锁屏幕」。重连**永不**
+ *   因预算耗尽而放弃（MIUI 重复回调曾把 attempt 灌水烧光 → 永久失联）。
  *
  * ## 可测性
  * 构造参数全部是接口（[HidProfileGateway] / [BondEventSource] / [ReconnectScheduler]），
@@ -169,6 +174,22 @@ class HidDeviceTransport(
     private val reconnectAttempts = HashMap<String, Int>()
 
     /**
+     * 「连接中 → 直接断开」的连续闪败次数（真机实证：对端会话陈旧时每次 connect 都在
+     * 1 秒内被弹回）。达到 [CONNECT_FAIL_KICK_THRESHOLD] 后，退避重试前先补一记
+     * `disconnect` 摁掉陈旧会话再连，否则重试会以同一理由被立刻弹回。
+     */
+    private val connectFailStreak = HashMap<String, Int>()
+
+    /** `connect` 命令连续下发失败次数（注册失能时恒 false）；达到阈值转注册层自愈。 */
+    private val connectDispatchFailStreak = HashMap<String, Int>()
+
+    /** `sendReport` 连续失败次数（成功即清零）；连续 [SEND_FAIL_STREAK_LIMIT] 次判定链路已死。 */
+    private val sendFailStreak = HashMap<String, Int>()
+
+    /** 注册层自愈（[forceReRegister]）是否在途（unregister → 延迟重注册之间的窗口）。 */
+    private var registrationRecoveryInFlight = false
+
+    /**
      * 用户主动断开的地址（粘性断开）：对端回连 / 对账轮询都不自动恢复，
      * 点「连接」（[connectHost]）或删除设备才从集合里移除。
      */
@@ -218,7 +239,13 @@ class HidDeviceTransport(
 
     override fun start() {
         synchronized(lock) {
-            if (started) return
+            if (started) {
+                // 已在运行但注册可能已被系统收走（App 退后台 / 锁屏被自动注销，
+                // 注册回调还可能丢——真机实证的「显示已连接、操作没反应」主因之一）：
+                // 回到前台的 start() 必须补一次重注册，否则 sendReport 永远失败。
+                // 已有注册在途（看门狗未到期）不重复下注册命令。
+                if (isAppRegistered || registrationWatchdogCancel != null) return
+            }
             started = true
         }
         gateway.open(
@@ -238,6 +265,11 @@ class HidDeviceTransport(
             started = false
             reconnectScheduler.cancelAll()
             reconnectAttempts.clear()
+            connectFailStreak.clear()
+            connectDispatchFailStreak.clear()
+            sendFailStreak.clear()
+            registrationRecoveryInFlight = false
+            registrationWatchdogCancel = null
             registry.allEntries().forEach { registry.onDisconnected(it.address) }
             activeButtonMask = 0
             pendingReport = null
@@ -305,21 +337,13 @@ class HidDeviceTransport(
 
     // ============================================================ 多设备控制（契约外附加 API）
 
-    /** 切换当前控制目标（配对页点击列表项 / 五指手势切设备）。 */
+    /** 切换当前控制目标（配对页点击列表项）。 */
     fun setActiveDevice(address: String?) {
         synchronized(lock) {
             if (registry.setActive(address)) {
                 statusListener.onActiveDeviceChanged(address?.let { registry.deviceInfo(it) })
             }
         }
-    }
-
-    /** 在已连接主机之间循环切换控制目标，返回切换后的设备信息（无变化返回 null）。 */
-    fun cycleActiveDevice(): HidDeviceInfo? = synchronized(lock) {
-        val next = registry.cycleActive() ?: return null
-        val info = registry.deviceInfo(next)
-        statusListener.onActiveDeviceChanged(info)
-        info
     }
 
     /** 主动连接某个已配对主机。 */
@@ -343,10 +367,21 @@ class HidDeviceTransport(
             nudgeWedgedDisconnecting(address)
             val accepted = gateway.connect(address)
             Log.i(TAG, "gateway.connect($address) = $accepted")
-            if (!accepted) {
+            if (accepted) {
+                connectDispatchFailStreak.remove(address)
+            } else {
+                val streak = (connectDispatchFailStreak[address] ?: 0) + 1
+                connectDispatchFailStreak[address] = streak
                 registry.updateConnectionState(address, HidHostRegistry.STATE_DISCONNECTED)
                 statusListener.onHostConnectFailed(address)
                 scheduleReconnect(address)
+                // connect 连续下发失败 = 注册层多半已失能（未注册的 App connect 恒 false）：
+                // 光退避重连只会永远失败，转注册层自愈才能恢复（回前台 start() 之外的
+                // 第二条自愈入口，覆盖「用户一直停在前台但注册已被系统收走」的形态）
+                if (streak >= CONNECT_DISPATCH_FAIL_LIMIT) {
+                    connectDispatchFailStreak.remove(address)
+                    forceReRegister()
+                }
             }
         }
     }
@@ -371,6 +406,9 @@ class HidDeviceTransport(
         synchronized(lock) {
             userDisconnects.add(address)
             connectStuckTicks.remove(address)
+            connectFailStreak.remove(address)
+            connectDispatchFailStreak.remove(address)
+            sendFailStreak.remove(address)
             reconnectScheduler.cancel(address)
             reconnectAttempts.remove(address)
             gateway.disconnect(address)
@@ -380,6 +418,7 @@ class HidDeviceTransport(
         }
         // 全量快照也要跟着收（删除流程之外的「断开」入口没有 UI 侧补丁可依赖）
         publishConnectedHosts()
+        publishActiveDevice()
     }
 
     /** 当前已连接主机（连接顺序）。 */
@@ -398,9 +437,11 @@ class HidDeviceTransport(
 
     override fun onAppStatusChanged(pluggedDeviceAddress: String?, registered: Boolean) {
         Log.i(TAG, "onAppStatusChanged registered=$registered plugged=$pluggedDeviceAddress")
-        // 回调到达 = 注册流程有确定结果，看门狗退场；成功时自愈轮数清零
+        // 回调到达 = 注册流程有确定结果，看门狗退场；成功时自愈轮数清零。
+        // 注册自愈空窗同样结束（forceReRegister 的延迟重注册可据此「已恢复就不插手」）
         registrationWatchdogCancel?.invoke()
         registrationWatchdogCancel = null
+        registrationRecoveryInFlight = false
         if (registered) registrationAttempts = 0
         synchronized(lock) {
             isAppRegistered = registered
@@ -480,7 +521,23 @@ class HidDeviceTransport(
                 Log.i(TAG, "ignore state=$state for user-disconnected $address")
                 return
             }
+            val previous = registry.entry(address)?.connectionState
+            if (previous == state) {
+                // MIUI 会把同一次断开回调**派发两遍**（真机 logcat 实证：state=0 相隔 1ms
+                // 到两次）：第二遍没有状态跃变，若照常走 scheduleReconnect 会把退避
+                // attempt 灌水翻倍、提前烧光重连预算（曾经的「操作再也没反应」元凶之一）
+                Log.i(TAG, "duplicate state=$state for $address, ignored")
+                return
+            }
             connectStuckTicks.remove(address)
+            when {
+                state == HidHostRegistry.STATE_CONNECTED -> connectFailStreak.remove(address)
+                previous == HidHostRegistry.STATE_CONNECTING &&
+                    state == HidHostRegistry.STATE_DISCONNECTED -> {
+                    // 「连接中 → 直接断开」= 本次 connect 闪败（对端拒接 / 握手没完成）
+                    connectFailStreak[address] = (connectFailStreak[address] ?: 0) + 1
+                }
+            }
         }
         var becameConnected = false
         synchronized(lock) {
@@ -577,6 +634,7 @@ class HidDeviceTransport(
         statusListener.onHostDisconnected(address)
         scheduleReconnect(address)
         publishConnectedHosts()
+        publishActiveDevice()
     }
 
     // ============================================================ 内部实现
@@ -615,6 +673,9 @@ class HidDeviceTransport(
             REGISTRATION_WATCHDOG_KEY,
             REGISTRATION_WATCHDOG_MS,
         ) {
+            // 看门狗已到期（不再「在途」）：句柄清掉，start() / forceReRegister 的
+            // 防重入闸「有注册在途就不插手」才认得出真实的空窗
+            synchronized(lock) { registrationWatchdogCancel = null }
             if (synchronized(lock) { isAppRegistered }) return@schedule
             registrationAttempts += 1
             if (registrationAttempts <= REGISTRATION_MAX_RECOVERIES) {
@@ -779,6 +840,7 @@ class HidDeviceTransport(
             synchronized(lock) {
                 reconnectScheduler.cancelAll()
                 reconnectAttempts.clear()
+                registrationRecoveryInFlight = false
                 registry.allEntries().forEach { registry.onDisconnected(it.address) }
                 activeButtonMask = 0
                 isAppRegistered = false
@@ -819,6 +881,19 @@ class HidDeviceTransport(
         val connected = synchronized(lock) { registry.connectedAddresses() }
         Log.i(TAG, "publishConnectedHosts: registry connected = $connected")
         statusListener.onConnectedDevicesChanged(connected.toSet())
+    }
+
+    /**
+     * 推送「当前控制目标」快照（含 null）。
+     *
+     * `registry.onDisconnected` 会让位 / 清空 activeAddress，但只在
+     * [onConnectionStateChanged] 里有对应通知；虚拟线缆拔掉、手动断开、卡死判败等
+     * 路径此前不通知，UI 的设备名条就会停在「上一个目标」上（用户看到的
+     * 「已连接」假象之一）。统一在这里补推。
+     */
+    private fun publishActiveDevice() {
+        val info = synchronized(lock) { registry.activeAddress?.let { registry.deviceInfo(it) } }
+        statusListener.onActiveDeviceChanged(info)
     }
 
     /**
@@ -902,28 +977,32 @@ class HidDeviceTransport(
             // 粘性断开：用户明确断开过，不自动重连
             if (address in userDisconnects) return
             if (!started) return
+            // 退避 attempt 只影响间隔（[ReconnectPolicy.delayFor] 15s 封顶），
+            // **不设放弃上限**：真机实证「重连预算烧光 → 永久放弃」在用户视角就是
+            // 「操作永远没反应」。只要还配对着、用户没手动断开，就按 15s 节拍守护重连。
             val attempt = (reconnectAttempts[address] ?: 0) + 1
-            if (!ReconnectPolicy.shouldRetry(attempt)) {
-                reconnectAttempts.remove(address)
-                // 重试预算耗尽：给 UI 一个最终可见的失败态，等用户手动点「连接」
-                statusListener.onHostConnectFailed(address)
-                return
-            }
             reconnectAttempts[address] = attempt
             val delay = ReconnectPolicy.delayFor(attempt)
             Log.i(TAG, "schedule reconnect $address attempt=$attempt delay=$delay")
             reconnectScheduler.cancel(address)
             reconnectScheduler.schedule(address, delay) {
-                synchronized(lock) {
-                    if (!started) return@synchronized
+                val proceed = synchronized(lock) {
+                    if (!started) return@synchronized false
                     val current = registry.entry(address)
-                    if (current == null || current.isConnected) return@synchronized
+                    if (current == null || current.isConnected) return@synchronized false
                     statusListener.onReconnecting(address, attempt)
+                    // 连续闪败的对端多半还攥着陈旧会话（真机实证 connect 1 秒内被弹回）：
+                    // 重试前补一记 disconnect 摁掉它，否则重试会以同一理由再被弹回
+                    if ((connectFailStreak[address] ?: 0) >= CONNECT_FAIL_KICK_THRESHOLD) {
+                        Log.w(TAG, "connect连续闪败，重试前先 disconnect 摁掉陈旧会话：$address")
+                        gateway.disconnect(address)
+                    }
+                    true
                 }
                 // 退避重试统一走 connectHost：粘性断开解除、卡死计时复位、
                 // 「连接中」提示与失败补救都在同一条路径上（此前直接裸调
                 // gateway.connect，一旦回调丢失就再也没有人推进状态机）
-                connectHost(address)
+                if (proceed) connectHost(address)
             }
         }
     }
@@ -941,8 +1020,17 @@ class HidDeviceTransport(
 
     private fun scheduleReconcileTick() {
         reconnectScheduler.schedule(RECONCILE_TICK_KEY, RECONCILE_INTERVAL_MS) {
-            if (!synchronized(lock) { started && isAppRegistered }) return@schedule
-            reconcileTick()
+            if (!synchronized(lock) { started }) return@schedule
+            if (!gateway.isReady) {
+                // profile 代理死亡（onServiceDisconnected 只清字段不恢复）：此后所有命令
+                // 静默失败、状态永久假。重建代理并重注册；ticker 本体继续活着
+                Log.w(TAG, "profile proxy lost, reopening gateway + re-register")
+                forceReRegister()
+            } else if (synchronized(lock) { isAppRegistered }) {
+                reconcileTick()
+            }
+            // ticker 只在 stop() 时终止：注册瞬态失能不再把对账链永久带走
+            // （曾经 observe 到一次 !isAppRegistered 就不再续排，此后无人纠正状态漂移）
             scheduleReconcileTick()
         }
     }
@@ -987,6 +1075,7 @@ class HidDeviceTransport(
             }
             statusListener.onHostConnectFailed(address)
             publishConnectedHosts()
+            publishActiveDevice()
             // 重试前先推动可能卡死的 DISCONNECTING 收尾（否则这次重试也会被默默挡掉）
             nudgeWedgedDisconnecting(address)
             scheduleReconnect(address)
@@ -1028,7 +1117,116 @@ class HidDeviceTransport(
         // A1：sendReport 的返回值此前被静默丢弃——它是「命令是否下发成功」的唯一信号，
         // 连接半开 / 对端已断时返回 false，不打印就无法在 logcat 里定位「按键没反应」
         Log.i(TAG, "gateway.sendReport($target, report=$reportId, size=${data.size}) = $accepted")
+        if (accepted) {
+            synchronized(lock) { sendFailStreak.remove(target) }
+        } else {
+            onSendFailed(target, reportId, data)
+        }
         return accepted
+    }
+
+    /**
+     * `sendReport` 失败处理（真机实证「显示已连接、操作没反应」的自愈入口）。
+     *
+     * 单次失败只记账（可能是瞬态抖动）；连续 [SEND_FAIL_STREAK_LIMIT] 次失败即判定
+     * 链路已死，按系统真值分流：
+     *
+     * - **系统真值仍说已连接** = 「注册被系统收走 / 注册楔死」的症状签名（连接还在、
+     *   报告却发不出去，且注册回调多半已丢）：触发 [forceReRegister] 注册层自愈，
+     *   重注册后经 plugged / 自动连接链路恢复，暂存的报告随后补发；
+     * - **系统真值说没连** = 真死链 / 半开链路：登记断开（UI 立刻变真）+ 补记
+     *   `disconnect` 摁掉半开会话 + 走标准退避重连。
+     *
+     * 失败的这份报告若可暂存则暂存（覆盖式，永远补发「最新的键鼠状态」），
+     * 重连 / 重注册成功后由 [flushPendingReport] 补发——用户敲的第一下不会白敲。
+     */
+    private fun onSendFailed(address: String, reportId: Int, data: ByteArray) {
+        val streak = synchronized(lock) {
+            val next = (sendFailStreak[address] ?: 0) + 1
+            sendFailStreak[address] = next
+            next
+        }
+        if (streak < SEND_FAIL_STREAK_LIMIT) {
+            Log.w(TAG, "sendReport failed for $address ($streak/$SEND_FAIL_STREAK_LIMIT)")
+            return
+        }
+        synchronized(lock) {
+            sendFailStreak.remove(address)
+            if (isStashableReport(reportId)) {
+                pendingReport = PendingReport(address, reportId, data)
+            }
+        }
+        val systemState = gateway.connectionState(address)
+        Log.w(TAG, "sendReport 连续失败且系统真值 state=$systemState → 自愈：$address")
+        if (systemState == HidHostRegistry.STATE_CONNECTED) {
+            forceReRegister()
+        } else {
+            synchronized(lock) {
+                registry.onDisconnected(address)
+                // 这里**不清**暂存：这份报告正是用户刚才的操作，重连成功后要补发
+            }
+            statusListener.onHostDisconnected(address)
+            publishConnectedHosts()
+            publishActiveDevice()
+            gateway.disconnect(address)
+            scheduleReconnect(address)
+        }
+    }
+
+    /**
+     * 探活：向当前**已连接**的控制目标发两份零位移鼠标报告。
+     *
+     * 回到前台时调用（MainActivity ON_START）。锁屏 / 后台期间注册可能已被系统收走
+     * 而回调丢失，状态还挂着「已连接」——探活报告走 [sendToActive] 的失败自愈链，
+     * 两份连续失败即触发注册层自愈，比等用户敲第一下才发现断联快得多。
+     * 零位移、零按键的鼠标报告对被控端是无操作，不产生任何输入副作用；
+     * 未连接的目标不发（避免把用户的「粘性断开」顶掉）。
+     */
+    fun probeActiveLink() {
+        val target = synchronized(lock) {
+            registry.preferredTarget()?.takeIf { registry.isConnected(it) }
+        } ?: return
+        Log.i(TAG, "probeActiveLink → $target")
+        sendMouseMove(0, 0)
+        sendMouseMove(0, 0)
+    }
+
+    /**
+     * 注册层自愈：`unregisterApp` 清残留 → 静默 [REGISTRATION_RETRY_DELAY_MS] →
+     * 重建代理重注册（与注册看门狗的第 ① 级自愈同一条路径）。
+     *
+     * 触发场景（真机实证）：系统把 HID 注册收走但回调丢失 / 注册楔死——此时
+     * `getConnectionState()` 仍报「已连接」，而 `sendReport` / `connect` 悄悄失败。
+     * 入口两处：[onSendFailed] 的「已连接却发不出」签名、[connectHost] 的连续下发失败。
+     *
+     * 两个防重入闸：注册在途（看门狗未到期）与本函数在途（unregister → 重注册之间的
+     * 空窗）都不重复触发；调用时把 [isAppRegistered] 压成 false——我们刚下了
+     * unregister，此后只有**新的**注册回调才能把它抬回 true，延迟重注册的守卫
+     * 「注册已恢复就不再插手」因此不会被陈旧标志骗过。
+     */
+    private fun forceReRegister() {
+        synchronized(lock) {
+            if (!started) return
+            if (registrationRecoveryInFlight || registrationWatchdogCancel != null) return
+            registrationRecoveryInFlight = true
+            registrationAttempts = 0
+            isAppRegistered = false
+        }
+        Log.w(TAG, "forceReRegister: unregisterApp + 延迟重建代理重注册")
+        gateway.unregisterApp()
+        reconnectScheduler.schedule(REGISTRATION_RETRY_KEY, REGISTRATION_RETRY_DELAY_MS) {
+            synchronized(lock) {
+                registrationRecoveryInFlight = false
+                if (!started) return@schedule
+                // 空窗期内有新注册回调 = 注册已恢复，不再插手
+                if (isAppRegistered) return@schedule
+            }
+            gateway.close()
+            gateway.open(
+                onReady = { tryRegisterApp() },
+                onFailed = { reason -> statusListener.onUnavailable(reason) },
+            )
+        }
     }
 
     /** 状态型报告（键盘 / 鼠标）可暂存补发；一次性事件（媒体键）不暂存。 */
@@ -1093,6 +1291,19 @@ class HidDeviceTransport(
 
         /** CONNECTING 连续多少个对账 tick 仍未连上即判失败（3 × 3s ≈ 9s 一次尝试）。 */
         private const val CONNECT_STUCK_TICKS = 3
+
+        /**
+         * `sendReport` 连续失败多少次即判定链路已死（单次失败可能是瞬态抖动）。
+         * 取 2：一次按键的按下 + 松开两份报告都失败就自愈，健康链路上的偶发单次
+         * 失败不会误伤连接。
+         */
+        private const val SEND_FAIL_STREAK_LIMIT = 2
+
+        /** `connect` 连续下发失败多少次转注册层自愈（3 次退避重试 ≈ 7s 全失败）。 */
+        private const val CONNECT_DISPATCH_FAIL_LIMIT = 3
+
+        /** 「连接中 → 断开」连续闪败多少次后，重试前先 `disconnect` 摁掉陈旧会话。 */
+        private const val CONNECT_FAIL_KICK_THRESHOLD = 2
 
         /** 对账 ticker 在 [ReconnectScheduler] 里的键。 */
         private const val RECONCILE_TICK_KEY = "#reconcile-tick"

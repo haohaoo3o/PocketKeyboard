@@ -18,14 +18,14 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * 五指挥势的业务回调。
  *
- * 三个回调都在手势识别成功的那一个事件里同步调用（不切线程），可以直接写
- * `MainViewModel.setMode(...)` / `setActiveDevice(...)`。
- * 全部参数都有默认空实现，用的时候只覆盖需要的那个即可。
+ * 两个回调都在手势识别成功的那一个事件里同步调用（不切线程），可以直接写
+ * `MainViewModel.setMode(...)`。全部参数都有默认空实现，用的时候只覆盖需要的那个即可。
  *
- * @param onPinch 五指收缩（指尖平均间距缩小超过 [GestureConstants.PINCH_SHRINK_RATIO]）
- * @param onSpread 五指张开（间距放大超过 [GestureConstants.SPREAD_GROW_RATIO]）
- * @param onSwipe 五指整体横滑（质心水平位移超过 [GestureConstants.SWIPE_DISTANCE]），
- *    [SwipeDirection.RIGHT] 表示手指整体向右移动
+ * 五指手势只保留一个：**五指短按**（5 指凑齐后短时间内全部抬起、且没有明显位移）。
+ * 收缩 / 张开 / 横滑那套复杂几何判定已按产品决策移除——真机上太难触发、
+ * 误判率高，用户明确要求「不要搞复杂手势操作了」。
+ *
+ * @param onFiveFingerTap 五指短按（[isFiveFingerTap] 判定），业务语义是「返回键盘页面」
  * @param onIntent 凑指窗口内观察到 [GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT]
  *    根以上手指、意图明确但还没凑满 5 指时触发。参数是**最大**手指数（单调不减）。
  *    竖屏融合页用它主动收起系统输入法——键盘弹出后屏幕下半是 IME 窗口，
@@ -33,9 +33,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  *    必须先让输入法让位，剩余的手指才落得进来。
  */
 class PocketGestureHandler(
-    val onPinch: () -> Unit = {},
-    val onSpread: () -> Unit = {},
-    val onSwipe: (SwipeDirection) -> Unit = {},
+    val onFiveFingerTap: () -> Unit = {},
     val onIntent: (fingerCount: Int) -> Unit = {},
 )
 
@@ -210,11 +208,15 @@ fun Modifier.gestureStateSelfHeal(
  *   └─ 凑指窗口（滑动）内凑满 5 指？
  *        ├─ 否 → 仲裁器交给触控板层；等所有手指抬起；reset；进入下一轮
  *        └─ 是 → 仲裁器声明五指层接管
- *                └─ 记录初始几何（质心 + 指尖平均间距）
- *                   └─ 持续跟踪：收缩 / 张开 / 质心横移 超过阈值即触发并 consume
- *                   └─ 有手指抬起 → 手势结束
- *                └─ 等所有手指抬起；reset；进入下一轮
+ *                └─ 记录凑齐时刻与质心
+ *                   └─ 跟踪到全部手指抬起：用 [isFiveFingerTap] 判「短按」
+ *                      （时长 ≤ TAP_MAX 且质心位移 ≤ TAP_SLOP → 触发并 consume）
+ *                └─ reset；进入下一轮
  * ```
+ *
+ * 五指手势**只有短按一种**（产品决策：收缩 / 张开 / 横滑那套几何判定在真机上
+ * 太难触发且互相误判，已整体移除）。跟踪阶段不再做任何几何分类，只回答一个问题：
+ * 「这是一次干净的五指轻点吗」。
  *
  * ## 凑指窗口为什么是「滑动的」
  *
@@ -231,12 +233,12 @@ fun Modifier.gestureStateSelfHeal(
  * 于是五指手势有充足的凑指时间，而单指 / 双指触控板操作几乎感觉不到等待：
  * 「按下即拖动」的手指一动过阈值，五指层在同一批事件里就放手了。
  *
- * ## 位移放手只适用于 1–2 指（真机实测第三轮，张开 / 收缩不灵的主根因）
+ * ## 位移放手只适用于 1–2 指（真机实测第三轮修正，短按判定同样依赖它）
  *
- * 「位移超过 [GestureConstants.FINGER_GATHER_MOVE_SLOP] 就放手」对**张开 / 捏合**是错杀：
- * 用户做一次张开，手指本来就是**边落边张开**的——第 3、第 4 根落下的同时，先落下那几根正在
- * 向外扩，位移分分钟超过 slop。一旦 ≥3 指就据此放手，症状就是「触控板页做张开 / 收缩没反应」
- * （手指一分开，五指层已经把触摸交还给触控板层，跟踪阶段根本进不去）。
+ * 「位移超过 [GestureConstants.FINGER_GATHER_MOVE_SLOP] 就放手」对**多指摆位**是错杀：
+ * 人手落 5 根手指本来就是边落边挪的——第 3、第 4 根落下的同时，先落下那几根正在
+ * 微调位置，位移分分钟超过 slop。一旦 ≥3 指就据此放手，症状就是「五指短按没反应」
+ * （手指还在落，五指层已经把触摸交还给触控板层，跟踪阶段根本进不去）。
  *
  * 3 指即「有五指挥势意图」（[GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT]），
  * 意图已确立，于是规则改为：
@@ -257,18 +259,18 @@ fun Modifier.gestureStateSelfHeal(
  *    的手指到不了本层。因此本层在凑指窗口内一观察到
  *    [GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT] 根手指就通过
  *    [PocketGestureHandler.onIntent] 让页面收起输入法，把屏幕抢回来再继续凑。
- * 2. **掌心 / 掌根多报一根指针**：`fiveFingerGeometry` 曾要求「恰好 5 根」，多一根掌根
+ * 2. **掌心 / 掌根多报一根指针**：几何判定曾要求「恰好 5 根」，多一根掌根
  *    接触就返回 null、整个手势被静默丢弃。现已改为「至少 5 根」。
- * 3. **横滑阈值 200dp**：440dpi 的 1080px 宽屏上折 550px，质心要横移过半屏。
- *    已降到 [GestureConstants.SWIPE_DISTANCE]（80dp / 220px）。
+ * 3. **横滑阈值 200dp**（历史记录，横滑已随复杂手势一并移除）：440dpi 的 1080px 宽屏上
+ *    折 550px，质心要横移过半屏，物理上不可能，「五指横滑」曾永远不触发。
  */
 private suspend fun PointerInputScope.detectPocketGestures(
     handler: () -> PocketGestureHandler,
     arbiter: GestureArbiter,
     gate: () -> FiveFingerGate?,
 ) {
-    val swipeThresholdPx = GestureConstants.SWIPE_DISTANCE.toPx()
     val gatherSlopPx = GestureConstants.FINGER_GATHER_MOVE_SLOP.toPx()
+    val tapSlopPx = GestureConstants.FIVE_FINGER_TAP_SLOP.toPx()
     awaitEachGesture {
         // finally 是复位路径审计（问题 3a / 2）后的关键改动：正常路径在 awaitAllPointersUp
         // 之后收敛，而协程被取消（ACTION_CANCEL 之外的 handler 重置——密度 / 视图配置
@@ -290,26 +292,26 @@ private suspend fun PointerInputScope.detectPocketGestures(
             // 抢到归属：触控板层的 awaitGestureOwner 会立刻返回 FIVE_FINGER 并放弃本次手势
             arbiter.claimFiveFinger()
             gate()?.observeGather(fingerCount = gathered.pressedCount, claimed = true)
-            PocketGestureLog.decision(
-                "凑满 ${gathered.pressedCount} 指 → 接管手势，" +
-                    "横滑阈值 ${"%.0f".format(swipeThresholdPx)}px",
-            )
+            PocketGestureLog.decision("凑满 ${gathered.pressedCount} 指 → 接管手势，进入短按跟踪")
 
-            val initialPoints = gathered.event.changes.filter { it.pressed }.toFingerPoints()
-            val initial = fiveFingerGeometry(initialPoints)
-            if (initial == null) {
-                // 理论上不会发生（上面已确认 ≥5 指），防御性处理
-                PocketGestureLog.warn("凑满 ${gathered.pressedCount} 指却算不出几何，放弃本轮")
-                awaitAllPointersUp()
-                return@awaitEachGesture
-            }
-
+            // 短按的判定基准：凑齐那一刻的时刻与每根手指的落点
+            val pressed = gathered.event.changes.filter { it.pressed }
+            val claimUptime =
+                pressed.maxOfOrNull { it.uptimeMillis } ?: firstDown.change.uptimeMillis
+            val claimFingers = pressed.associate { it.id.value to it.position }
             PocketGestureLog.trace(
-                "初始几何 质心(${"%.0f".format(initial.centroidX)}, " +
-                    "${"%.0f".format(initial.centroidY)}) 平均间距 ${"%.0f".format(initial.meanSpacing)}px",
+                "凑齐 ${claimFingers.size} 指，短按窗口 " +
+                    "${GestureConstants.FIVE_FINGER_TAP_MAX_MS}ms / " +
+                    "单指位移容差 ${"%.0f".format(tapSlopPx)}px",
             )
 
-            trackAndFireFiveFingerGesture(initial, swipeThresholdPx, handler)
+            trackFiveFingerTap(
+                claimUptime = claimUptime,
+                claimFingers = claimFingers,
+                tapMaxMs = GestureConstants.FIVE_FINGER_TAP_MAX_MS,
+                tapSlopPx = tapSlopPx,
+                handler = handler,
+            )
 
             awaitAllPointersUp()
         } finally {
@@ -319,74 +321,73 @@ private suspend fun PointerInputScope.detectPocketGestures(
 }
 
 /**
- * 跟踪阶段：比较「初始几何」与「当前几何」，命中阈值就触发回调。
+ * 「五指短按」判定（纯函数，JVM 单测覆盖）。
  *
- * - 收缩 / 张开是「一次性」手势，命中即结束；
- * - 横滑按 [GestureConstants.MAX_DEVICE_SWITCHES_PER_GESTURE] 配额发放：每再移动一个
- *   [GestureConstants.SWIPE_DISTANCE] 才允许切下一台，避免一次长滑连续跳过多台设备。
+ * 短按 = 5 指凑齐后在 [tapMaxMs] 内**全部**抬起，且期间没有任何一根手指相对
+ * 自己落点的位移超过 [tapSlopPx]。长按（手指停在屏上歇着）、带位移的拖 / 滑都不算。
+ *
+ * @param elapsedMs 凑齐（第 5 指落下）到最后抬起的时长
+ * @param maxFingerTravelPx 跟踪期间**单指**相对各自落点的最大位移。
+ *    刻意不用「质心位移」：逐个抬指时质心会跳变（5 指散布屏幕时一抬指就跳 100px+），
+ *    按质心判会把正常的「逐个抬手」错杀成拖动——短按在真机上永远触发不了。
  */
-private suspend fun AwaitPointerEventScope.trackAndFireFiveFingerGesture(
-    initial: FiveFingerGeometry,
-    swipeThresholdPx: Float,
+internal fun isFiveFingerTap(
+    elapsedMs: Long,
+    maxFingerTravelPx: Float,
+    tapMaxMs: Long,
+    tapSlopPx: Float,
+): Boolean = elapsedMs in 0..tapMaxMs && maxFingerTravelPx <= tapSlopPx
+
+/**
+ * 短按跟踪：从「5 指凑齐」跟到「全部手指抬起」，用 [isFiveFingerTap] 判定并触发回调。
+ *
+ * - 位移按**逐指**跟踪（各比各的落点，取最大值）：手指抬起是「离场」不是「移动」，
+ *   不参与判定；中途落下的新手指以自己的落下位置为基准；
+ * - 时长超过 [tapMaxMs] 即提前判死，但仍等**全部**手指抬起才返回——中途不消费、
+ *   不切页面，避免 5 指还按在屏上时就跳到新页面、剩下的手指变成误触输入；
+ * - 逐个抬起（先抬一根再抬其余）也算「全部抬起」，判定在最后一根离屏时做出；
+ * - 判定成功才 `consume()`（告诉其他层「这次触摸有主了」），失败一个事件都不消费。
+ */
+private suspend fun AwaitPointerEventScope.trackFiveFingerTap(
+    claimUptime: Long,
+    claimFingers: Map<Long, Offset>,
+    tapMaxMs: Long,
+    tapSlopPx: Float,
     handler: () -> PocketGestureHandler,
 ) {
-    var deviceSwitches = 0
-    // 上一次触发横滑时的质心横坐标；下一次横滑要以它为基准再移动一个阈值距离
-    var lastSwipeCentroidX = initial.centroidX
-    // 上一次打日志时的几何，用于把「本次事件比上次移动了多少」打进日志
-    var lastLogged = initial
-
-    while (deviceSwitches <= GestureConstants.MAX_DEVICE_SWITCHES_PER_GESTURE) {
+    val baselines = HashMap(claimFingers)
+    var maxTravel = 0f
+    var expired = false
+    while (true) {
         val event = awaitPointerEvent(PointerEventPass.Initial)
         val pressed = event.changes.filter { it.pressed }
-        if (pressed.size < GestureConstants.REQUIRED_FINGER_COUNT) {
-            // 有手指抬起，五指几何不再成立，手势自然结束
-            PocketGestureLog.decision("跟踪中有手指抬起（剩 ${pressed.size} 指）→ 手势结束")
+        val latestUptime = event.changes.maxOfOrNull { it.uptimeMillis } ?: claimUptime
+        val elapsed = latestUptime - claimUptime
+        if (elapsed > tapMaxMs) expired = true
+        if (pressed.isEmpty()) {
+            if (!expired && isFiveFingerTap(elapsed, maxTravel, tapMaxMs, tapSlopPx)) {
+                event.changes.forEach { it.consume() }
+                PocketGestureLog.decision(
+                    "判定[五指短按] 凑齐→抬起 ${elapsed}ms，单指最大位移 " +
+                        "${"%.0f".format(maxTravel)}px → 触发回调",
+                )
+                handler().onFiveFingerTap()
+            } else {
+                PocketGestureLog.decision(
+                    "五指全部抬起但不是短按（凑齐→抬起 ${elapsed}ms / 位移 " +
+                        "${"%.0f".format(maxTravel)}px${if (expired) "，已超时" else ""}）→ 不触发",
+                )
+            }
             return
         }
-        val current = fiveFingerGeometry(pressed.toFingerPoints()) ?: return
-        // 质心基准平移到上一次横滑的位置，间距基准仍是初始值
-        val baseline = initial.copy(centroidX = lastSwipeCentroidX)
-        when (val verdict = classifyFiveFingerGesture(baseline, current, swipeThresholdPx)) {
-            GestureVerdict.None -> {
-                PocketGestureLog.trace(
-                    "跟踪 质心x ${"%.0f".format(current.centroidX)} " +
-                        "(较上次 ${"%+.0f".format(current.centroidX - lastLogged.centroidX)}px)，" +
-                        "间距 ${"%.0f".format(current.meanSpacing)}px " +
-                        "(初始 ${"%.0f".format(initial.meanSpacing)}px) → 未达阈值",
-                )
-            }
-
-            GestureVerdict.Pinch, GestureVerdict.Spread -> {
-                // 只有真正识别出五指挥势的这一下才消费，告诉其他层「这次触摸有主了」
-                event.changes.forEach { it.consume() }
-                val label = if (verdict == GestureVerdict.Pinch) "收缩" else "张开"
-                PocketGestureLog.decision(
-                    "判定[$label] 间距 ${"%.0f".format(initial.meanSpacing)}px → " +
-                        "${"%.0f".format(current.meanSpacing)}px " +
-                        "(比例 ${"%.2f".format(current.meanSpacing / initial.meanSpacing)}) → 触发回调",
-                )
-                when (verdict) {
-                    GestureVerdict.Pinch -> handler().onPinch()
-                    else -> handler().onSpread()
-                }
-                return
-            }
-
-            is GestureVerdict.Swipe -> {
-                if (deviceSwitches >= GestureConstants.MAX_DEVICE_SWITCHES_PER_GESTURE) return
-                event.changes.forEach { it.consume() }
-                PocketGestureLog.decision(
-                    "判定[横滑 ${verdict.direction}] 质心x ${"%.0f".format(lastSwipeCentroidX)} → " +
-                        "${"%.0f".format(current.centroidX)} " +
-                        "(阈值 ${"%.0f".format(swipeThresholdPx)}px) → 触发回调",
-                )
-                handler().onSwipe(verdict.direction)
-                deviceSwitches++
-                lastSwipeCentroidX = current.centroidX
-            }
+        pressed.forEach { change ->
+            val baseline = baselines.getOrPut(change.id.value) { change.position }
+            val travel = kotlin.math.hypot(
+                (change.position.x - baseline.x).toDouble(),
+                (change.position.y - baseline.y).toDouble(),
+            ).toFloat()
+            if (travel > maxTravel) maxTravel = travel
         }
-        lastLogged = current
     }
 }
 
@@ -475,7 +476,7 @@ internal sealed interface GatherVerdict {
  * 1. **位移基准每来一根新手指就整体重设**：慢慢把 5 根手指摆开时，先落下的那几根有轻微
  *    漂移是正常摆位，不算「拖动」；
  * 2. **≥ [GestureConstants.FIVE_FINGER_INTENT_FINGER_COUNT] 指后不再因位移放手**：
- *    张开 / 捏合本来就是「边落边扩」，3 指起只受总窗口上限约束。
+ *    多指摆位本来就是「边落边挪」，3 指起只受总窗口上限约束。
  *
  * 状态机不读系统时钟：时间由调用方以 `nowUptime`（事件 uptime）喂进来，因此测试里
  * 可以用任意时间序列驱动。
@@ -534,7 +535,7 @@ internal class FingerGatherState(
             lastNewFingerUptime = nowUptime
         } else if (!intentEstablished && fingersMovedBeyondSlop(pressed)) {
             // 没有新手指、而已按下的手指明显在动 → 这是正在进行的触控板手势。
-            // 仅 1–2 指：≥3 指时意图已确立（张开 / 捏合就是边落边扩），不再据此放手
+            // 仅 1–2 指：≥3 指时意图已确立（多指摆位就是边落边挪），不再据此放手
             return GatherVerdict.Release(GatherReleaseReason.FINGERS_MOVING)
         }
 
