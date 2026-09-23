@@ -1,7 +1,9 @@
 package com.pocketkeyboard.app
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Rect
@@ -166,6 +168,17 @@ private fun PocketKeyboardApp(viewModel: MainViewModel = viewModel()) {
     // 这里读 LocalConfiguration 直接切换布局（横屏 = 全屏 87 键键盘 / 全屏触控板）
     val landscape =
         LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    // 首页（配对页）强制竖屏（实测反馈：横屏下配对码被裁掉、控件叠压成一团）；
+    // 其余页面（键盘 87 键 / 触控板）有专门的横屏布局，旋转保持自由
+    val activity = LocalContext.current as? Activity
+    LaunchedEffect(mode, activity) {
+        activity?.requestedOrientation = if (mode == AppMode.PAIRING) {
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
 
     // 页面级输入法收起（唯一 owner，见 FusedControlScreen 里 isActivePage 的说明）：
     // 竖屏融合页内部 mode 切换的弹 / 收由该页自己管；这里只管**离开融合页**的两种

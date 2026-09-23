@@ -37,11 +37,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -435,8 +435,7 @@ fun PairingScreen(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f, fill = false)
-                .verticalScroll(rememberScrollState()),
+                .weight(1f, fill = false),
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -910,14 +909,14 @@ private fun AddDeviceDialog(
             color = PureWhite.copy(alpha = 0.45f),
         )
         Spacer(modifier = Modifier.height(10.dp))
-        Column(
+        // LazyColumn：扫描环境设备多时也只组合可见行，滚动不卡
+        LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 280.dp)
-                .verticalScroll(rememberScrollState()),
+                .heightIn(max = 280.dp),
         ) {
-            devices.forEach { device ->
-                ScannedDeviceRow(device = device, onClick = { onPair(device) })
+            items(devices.size) { index ->
+                ScannedDeviceRow(device = devices[index], onClick = { onPair(devices[index]) })
                 Spacer(modifier = Modifier.height(8.dp))
             }
         }
@@ -1007,89 +1006,91 @@ private fun DeviceSections(
     onToggleConnection: (PairedDevice) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier = modifier.fillMaxWidth()) {
-        DeviceSection(
-            title = stringResource(R.string.pairing_devices_title),
-            emptyText = if (newDevices.isEmpty()) {
-                stringResource(R.string.pairing_devices_empty)
-            } else {
-                stringResource(R.string.pairing_devices_empty_unconfirmed)
-            },
-            devices = confirmedDevices,
-            activeDevice = activeDevice,
-            connectedAddresses = connectedAddresses,
-            connectingAddress = connectingAddress,
-            connectFailedAddress = connectFailedAddress,
-            onDeviceClick = onDeviceClick,
-            onDeviceLongClick = onDeviceLongClick,
-            onDeviceDelete = onDeviceDelete,
-            onToggleConnection = onToggleConnection,
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        DeviceSection(
-            title = stringResource(R.string.pairing_new_devices_title),
-            emptyText = stringResource(R.string.pairing_new_devices_empty),
-            devices = newDevices,
-            activeDevice = activeDevice,
-            connectedAddresses = connectedAddresses,
-            connectingAddress = connectingAddress,
-            connectFailedAddress = connectFailedAddress,
-            onDeviceClick = onDeviceClick,
-            onDeviceLongClick = onDeviceLongClick,
-            onDeviceDelete = onDeviceDelete,
-            onToggleConnection = onToggleConnection,
-        )
+    // LazyColumn 只组合可见行：设备记录多的时候，Column 全量组合 + 每行 Initial pass
+    // 的侧滑监听会让滚动明显掉帧、不跟手（实测反馈）。key 用「分区+地址」，
+    // 行滚出回收、滚回重建时侧滑露出等行内状态不错位
+    LazyColumn(modifier = modifier.fillMaxWidth()) {
+        item(key = "title-confirmed") {
+            SectionHeader(text = stringResource(R.string.pairing_devices_title))
+        }
+        if (confirmedDevices.isEmpty()) {
+            item(key = "empty-confirmed") {
+                SectionEmptyText(
+                    text = if (newDevices.isEmpty()) {
+                        stringResource(R.string.pairing_devices_empty)
+                    } else {
+                        stringResource(R.string.pairing_devices_empty_unconfirmed)
+                    },
+                )
+            }
+        } else {
+            items(confirmedDevices, key = { "confirmed-${it.address}" }) { device ->
+                DeviceRow(
+                    device = device,
+                    selected = device.address == activeDevice?.address,
+                    connected = device.address in connectedAddresses,
+                    connecting = device.address == connectingAddress,
+                    connectFailed = device.address == connectFailedAddress,
+                    onClick = { onDeviceClick(device) },
+                    onLongClick = { onDeviceLongClick(device) },
+                    onDelete = { onDeviceDelete(device) },
+                    onToggleConnection = { onToggleConnection(device) },
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+        }
+        item(key = "section-gap") { Spacer(modifier = Modifier.height(20.dp)) }
+        item(key = "title-new") {
+            SectionHeader(text = stringResource(R.string.pairing_new_devices_title))
+        }
+        if (newDevices.isEmpty()) {
+            item(key = "empty-new") {
+                SectionEmptyText(text = stringResource(R.string.pairing_new_devices_empty))
+            }
+        } else {
+            items(newDevices, key = { "new-${it.address}" }) { device ->
+                DeviceRow(
+                    device = device,
+                    selected = device.address == activeDevice?.address,
+                    connected = device.address in connectedAddresses,
+                    connecting = device.address == connectingAddress,
+                    connectFailed = device.address == connectFailedAddress,
+                    onClick = { onDeviceClick(device) },
+                    onLongClick = { onDeviceLongClick(device) },
+                    onDelete = { onDeviceDelete(device) },
+                    onToggleConnection = { onToggleConnection(device) },
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+        }
     }
 }
 
-/** 单个分区：标题 + 设备行 / 空态文案。 */
+/** 分区标题（列表项）：标题文字 + 与首行的间距。 */
 @Composable
-private fun DeviceSection(
-    title: String,
-    emptyText: String,
-    devices: List<PairedDevice>,
-    activeDevice: PairedDevice?,
-    connectedAddresses: Set<String>,
-    connectingAddress: String?,
-    connectFailedAddress: String?,
-    onDeviceClick: (PairedDevice) -> Unit,
-    onDeviceLongClick: (PairedDevice) -> Unit,
-    onDeviceDelete: (PairedDevice) -> Unit,
-    onToggleConnection: (PairedDevice) -> Unit,
-    modifier: Modifier = Modifier,
-) {
+private fun SectionHeader(text: String, modifier: Modifier = Modifier) {
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
-            text = title,
+            text = text,
             style = MaterialTheme.typography.labelLarge,
             color = PureWhite.copy(alpha = 0.5f),
             letterSpacing = 2.sp,
         )
         Spacer(modifier = Modifier.height(10.dp))
-        if (devices.isEmpty()) {
-            Text(
-                text = emptyText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = PureWhite.copy(alpha = 0.4f),
-                modifier = Modifier.padding(vertical = 12.dp),
-            )
-            return@Column
-        }
-        devices.forEach { device ->
-            DeviceRow(
-                device = device,
-                selected = device.address == activeDevice?.address,
-                connected = device.address in connectedAddresses,
-                connecting = device.address == connectingAddress,
-                connectFailed = device.address == connectFailedAddress,
-                onClick = { onDeviceClick(device) },
-                onLongClick = { onDeviceLongClick(device) },
-                onDelete = { onDeviceDelete(device) },
-                onToggleConnection = { onToggleConnection(device) },
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-        }
     }
+}
+
+/** 分区空态文案（列表项）。 */
+@Composable
+private fun SectionEmptyText(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = PureWhite.copy(alpha = 0.4f),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+    )
 }
 
 /**

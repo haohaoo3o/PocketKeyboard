@@ -53,12 +53,12 @@ for PERM in ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION BLUETOOTH_CONNECT \
 done
 adb -s "$DEV" shell am start -n "$ACT" >/dev/null
 sleep 3
-# 等待广播名改写生效（App 启动后把蓝牙名设为 PocketKeyboard-<品牌>）：
+# 等待广播名改写生效（App 启动后把蓝牙名设为 PocketKeyboard_<品牌>）：
 # force-stop 后首次启动可能要先走注册自愈（约 20s）才改名，截早了会拍到旧系统名。
-echo "==> 等待广播名 PocketKeyboard-* 生效"
+echo "==> 等待广播名 PocketKeyboard_* 生效"
 for _ in $(seq 1 40); do
   NAME="$(adb -s "$DEV" shell settings get secure bluetooth_name | tr -d '\r')"
-  case "$NAME" in PocketKeyboard-*) break ;; esac
+  case "$NAME" in PocketKeyboard_*) break ;; esac
   sleep 1
 done
 sleep 1

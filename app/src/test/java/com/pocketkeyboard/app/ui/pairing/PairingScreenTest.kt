@@ -6,12 +6,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -108,14 +111,18 @@ class PairingScreenTest {
         )
         setScreen(viewModel)
 
-        // 两个分区标题都在
+        // 上半区（LazyColumn 只组合可见项，屏外的先滚过去再断言）
         composeRule.onNodeWithText("已配对设备").assertExists()
-        composeRule.onNodeWithText("新发现的设备").assertExists()
-
-        // 已确认平台的两台设备在列表里，且各带对应平台图标
-        // （ViewModel 里的 platform 是桥接探测值，展示以 DataStore 记录为准）
         composeRule.onNodeWithText("测试 iPad").assertExists()
         composeRule.onNodeWithContentDescription("苹果设备图标").assertIsDisplayed()
+
+        // 滚到下半区：两台 OTHER 平台设备（测试 Windows + 未确认）相邻同屏
+        composeRule.onNode(hasScrollAction())
+            .performScrollToNode(hasText("未确认平台的设备"))
+        composeRule.onNodeWithText("新发现的设备").assertExists()
+
+        // 已确认平台的设备在列表里，且各带对应平台图标
+        // （ViewModel 里的 platform 是桥接探测值，展示以 DataStore 记录为准）
         composeRule.onNodeWithText("测试 Windows").assertExists()
         // 未确认平台的设备平台也是 OTHER，因此共有两个「其他设备图标」
         composeRule.onAllNodesWithContentDescription("其他设备图标").assertCountEquals(2)
@@ -168,8 +175,11 @@ class PairingScreenTest {
         composeRule.waitForIdle()
 
         composeRule.onAllNodesWithText("这是苹果设备还是其他设备？").assertCountEquals(0)
-        // 设备移入上区：上区不再空、下区变空（各自有独立空态文案）
+        // 设备移入上区：上区不再空、下区变空（各自有独立空态文案）。
+        // LazyColumn 只组合可见项：下区空态先滚过去再断言
         composeRule.onAllNodesWithText("暂无已配对设备").assertCountEquals(0)
+        composeRule.onNode(hasScrollAction())
+            .performScrollToNode(hasText("暂无新发现的设备"))
         composeRule.onNodeWithText("暂无新发现的设备").assertExists()
         // DataStore 里记下了平台选择
         val platforms = DevicePlatformStore(context).platforms.first()
